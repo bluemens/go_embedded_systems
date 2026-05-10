@@ -31,11 +31,15 @@ set_module_property REPORT_HIERARCHY       false
 set_module_property DESCRIPTION            "9x9 Go game peripheral: VGA + audio (audio added Phase 6)"
 
 # ─── File set ────────────────────────────────────────────────────────────────
+# Phase 2: now multi-file (go_peripheral.sv + board_mem.sv). When you re-import
+# this IP in Platform Designer after Phase 2 changes, both files must be
+# present in hw/. Quartus picks them up via this fileset.
 add_fileset QUARTUS_SYNTH QUARTUS_SYNTH "" ""
 set_fileset_property QUARTUS_SYNTH TOP_LEVEL go_peripheral
 set_fileset_property QUARTUS_SYNTH ENABLE_RELATIVE_INCLUDE_PATHS false
 set_fileset_property QUARTUS_SYNTH ENABLE_FILE_OVERWRITE_MODE false
 add_fileset_file go_peripheral.sv SYSTEM_VERILOG PATH go_peripheral.sv TOP_LEVEL_FILE
+add_fileset_file board_mem.sv     SYSTEM_VERILOG PATH board_mem.sv
 
 # ─── Clock sink ──────────────────────────────────────────────────────────────
 add_interface clock clock end
