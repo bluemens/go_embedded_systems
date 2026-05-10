@@ -1,11 +1,13 @@
 /*
  * go_peripheral — Avalon memory-mapped VGA peripheral for the 9x9 Go game
  *
- * Phase 2: tilemap-driven board with HPS-controllable stones.
- *   - Adds register decoder for SET_BLACK / SET_WHITE / CLEAR_CELL / RESET_BOARD.
- *   - Adds board_mem submodule (81 cells × 2 bits).
- *   - Adds procedural stone rendering: filled circle of stone color when the
- *     pixel falls inside a non-EMPTY cell's stone radius.
+ * Phase 3: cursor overlay (green ring) on top of the tilemap board.
+ *   - Adds CURSOR register at offset 0x04: {visible[7], cell_idx[6:0]}
+ *   - Cursor draws a green ring at (cursor_idx == current_cell_idx) when
+ *     visible. Ring sits ABOVE the stone fill, so it remains visible even
+ *     when scrolling over an occupied cell.
+ *
+ * (Phase 2 added: register decoder, board_mem, stone-circle rendering.)
  *
  * The Avalon slave shape is unchanged from Phase 1 (3-bit byte address,
  * 8-bit data, write-only) so the Qsys IP stays imported as-is.
@@ -15,7 +17,8 @@
  *   0x01  SET_WHITE    W   writedata = cell_idx          → cells[idx] = WHITE
  *   0x02  CLEAR_CELL   W   writedata = cell_idx          → cells[idx] = EMPTY
  *   0x03  RESET_BOARD  W   writedata = anything          → all cells = EMPTY
- *   0x04..0x07         (reserved for Phase 3 — cursor / render mode)
+ *   0x04  CURSOR       W   writedata = {visible[7], cell_idx[6:0]}
+ *   0x05..0x07         (reserved for Phase 5 / Phase 8 — strip / render mode)
  *
  * Pipeline (combinational from VGA counters to RGB):
  *   hcount, vcount  →  px (=hcount[10:1]), py (=vcount)
@@ -76,15 +79,20 @@ module go_peripheral(
     localparam logic [2:0] REG_SET_WHITE   = 3'h1;
     localparam logic [2:0] REG_CLEAR_CELL  = 3'h2;
     localparam logic [2:0] REG_RESET_BOARD = 3'h3;
+    localparam logic [2:0] REG_CURSOR      = 3'h4;
 
     logic        bm_write_en;
     logic [6:0]  bm_write_addr;
     logic [1:0]  bm_write_data;
     logic        bm_reset_all;
 
+    // Cursor state: registered so it persists between writes
+    logic        cursor_visible;
+    logic [6:0]  cursor_idx;
+
     always_comb begin
         bm_write_en   = 1'b0;
-        bm_write_addr = writedata[6:0];   // cell_idx in [0,80] (validated in board_mem)
+        bm_write_addr = writedata[6:0];
         bm_write_data = 2'b00;
         bm_reset_all  = 1'b0;
 
@@ -94,8 +102,19 @@ module go_peripheral(
                 REG_SET_WHITE:   begin bm_write_en = 1; bm_write_data = 2'b10; end
                 REG_CLEAR_CELL:  begin bm_write_en = 1; bm_write_data = 2'b00; end
                 REG_RESET_BOARD: begin bm_reset_all = 1;                       end
+                REG_CURSOR:      ;   // handled in always_ff below
                 default: ;  // reserved offsets ignored
             endcase
+        end
+    end
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            cursor_visible <= 1'b1;
+            cursor_idx     <= 7'd40;        // tengen: row 4, col 4 → 4*9+4 = 40
+        end else if (chipselect && write && address == REG_CURSOR) begin
+            cursor_visible <= writedata[7];
+            cursor_idx     <= writedata[6:0];
         end
     end
 
@@ -165,9 +184,13 @@ module go_peripheral(
     logic in_stone;
     logic on_grid;
     logic in_star_dot;
+    logic on_cursor;
     assign in_stone    = (cell_value != 2'b00) && (d2 <= STONE_R2_MAX);
     assign on_grid     = (local_x == HALF_CELL) || (local_y == HALF_CELL);
     assign in_star_dot = is_star_cell && (cell_value == 2'b00) && (d2 <= STAR_R2_MAX);
+    // Cursor: 3-pixel-wide ring at radius ~18 (d² ∈ [264, 400] → r ∈ [16.2, 20])
+    assign on_cursor   = cursor_visible && (cursor_idx == cell_idx)
+                      && (d2 >= 22'd264) && (d2 <= 22'd400);
 
     // ─── Color output ───────────────────────────────────────────────────────
     // Phase 2: still hardcoded RGB888. Phase 4 introduces the palette ROM.
@@ -177,15 +200,16 @@ module go_peripheral(
     localparam logic [23:0] COLOR_BLACK    = 24'h101010;
     localparam logic [23:0] COLOR_WHITE    = 24'hF0F0F0;
     localparam logic [23:0] COLOR_OUTLINE  = 24'h000000;
+    localparam logic [23:0] COLOR_CURSOR   = 24'h00C040;     // green ring
 
     always_comb begin
         if (!VGA_BLANK_n) begin
             {VGA_R, VGA_G, VGA_B} = 24'h000000;
         end else if (in_board) begin
-            if (in_stone) begin
-                // Black stone: solid black. White stone: white with a 1-pixel
-                // black outline at the edge of the radius (d² in top band) so
-                // it remains visible against the burlywood board.
+            // Cursor sits ON TOP of stones so it's always visible
+            if (on_cursor) begin
+                {VGA_R, VGA_G, VGA_B} = COLOR_CURSOR;
+            end else if (in_stone) begin
                 if (cell_value == 2'b01)
                     {VGA_R, VGA_G, VGA_B} = COLOR_BLACK;
                 else if (d2 >= 22'd289)               // r ≥ 17 → outline ring
