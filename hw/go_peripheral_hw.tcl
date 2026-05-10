@@ -40,6 +40,7 @@ set_fileset_property QUARTUS_SYNTH ENABLE_RELATIVE_INCLUDE_PATHS false
 set_fileset_property QUARTUS_SYNTH ENABLE_FILE_OVERWRITE_MODE false
 add_fileset_file go_peripheral.sv SYSTEM_VERILOG PATH go_peripheral.sv TOP_LEVEL_FILE
 add_fileset_file board_mem.sv     SYSTEM_VERILOG PATH board_mem.sv
+add_fileset_file strip_fb.sv      SYSTEM_VERILOG PATH strip_fb.sv
 
 # ─── Clock sink ──────────────────────────────────────────────────────────────
 add_interface clock clock end
@@ -83,6 +84,36 @@ set_interface_assignment avalon_slave_0 embeddedsw.configuration.isFlash        
 set_interface_assignment avalon_slave_0 embeddedsw.configuration.isMemoryDevice      0
 set_interface_assignment avalon_slave_0 embeddedsw.configuration.isNonVolatileStorage 0
 set_interface_assignment avalon_slave_0 embeddedsw.configuration.isPrintableDevice   0
+
+# ─── Avalon slave 1 (Phase 5: strip framebuffer write window) ───────────────
+# 32-bit data, 14-bit word address (covers all 9,600 valid words; addresses
+# >= 9600 are silently ignored by strip_fb.sv).
+add_interface avalon_slave_1 avalon end
+set_interface_property avalon_slave_1 addressUnits                  WORDS
+set_interface_property avalon_slave_1 associatedClock               clock
+set_interface_property avalon_slave_1 associatedReset               reset
+set_interface_property avalon_slave_1 bitsPerSymbol                 8
+set_interface_property avalon_slave_1 burstOnBurstBoundariesOnly    false
+set_interface_property avalon_slave_1 burstcountUnits               WORDS
+set_interface_property avalon_slave_1 explicitAddressSpan           0
+set_interface_property avalon_slave_1 holdTime                      0
+set_interface_property avalon_slave_1 linewrapBursts                false
+set_interface_property avalon_slave_1 maximumPendingReadTransactions  0
+set_interface_property avalon_slave_1 maximumPendingWriteTransactions 0
+set_interface_property avalon_slave_1 readLatency                   0
+set_interface_property avalon_slave_1 readWaitTime                  1
+set_interface_property avalon_slave_1 setupTime                     0
+set_interface_property avalon_slave_1 timingUnits                   Cycles
+set_interface_property avalon_slave_1 writeWaitTime                 0
+set_interface_property avalon_slave_1 ENABLED                       true
+add_interface_port avalon_slave_1 strip_writedata  writedata   Input 32
+add_interface_port avalon_slave_1 strip_write      write       Input 1
+add_interface_port avalon_slave_1 strip_chipselect chipselect  Input 1
+add_interface_port avalon_slave_1 strip_address    address     Input 14
+set_interface_assignment avalon_slave_1 embeddedsw.configuration.isFlash             0
+set_interface_assignment avalon_slave_1 embeddedsw.configuration.isMemoryDevice      1
+set_interface_assignment avalon_slave_1 embeddedsw.configuration.isNonVolatileStorage 0
+set_interface_assignment avalon_slave_1 embeddedsw.configuration.isPrintableDevice   0
 
 # ─── VGA conduit (exported through Qsys to top-level pins) ──────────────────
 add_interface vga conduit end

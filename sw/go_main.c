@@ -27,20 +27,24 @@
 
 #include "board.h"
 #include "usbkeyboard.h"
+#include "strip_render.h"
 
-/* ─── HW interface (mirrors go_phase3.c) ─────────────────────────────────── */
+/* ─── HW interface ───────────────────────────────────────────────────────── */
 
 #define LW_BRIDGE_BASE   0xFF200000UL
 #define LW_BRIDGE_SPAN   0x00200000UL
-#define GO_PERIPHERAL_OFFSET  0x0000
+#define GO_PERIPHERAL_OFFSET  0x0000        /* avalon_slave_0 */
+#define STRIP_FB_OFFSET       0x10000       /* avalon_slave_1 (set in Qsys) */
 
 #define REG_SET_BLACK    0x00
 #define REG_SET_WHITE    0x01
 #define REG_CLEAR_CELL   0x02
 #define REG_RESET_BOARD  0x03
 #define REG_CURSOR       0x04
+#define REG_STRIP_SWAP   0x05
 
 static volatile uint8_t *go_regs;
+static volatile uint8_t *lw_base;     /* shared with strip_render */
 
 static int hw_init(void)
 {
@@ -49,7 +53,8 @@ static int hw_init(void)
     void *base = mmap(NULL, LW_BRIDGE_SPAN, PROT_READ | PROT_WRITE,
                       MAP_SHARED, fd, LW_BRIDGE_BASE);
     if (base == MAP_FAILED) { perror("mmap"); close(fd); return -1; }
-    go_regs = (volatile uint8_t *)base + GO_PERIPHERAL_OFFSET;
+    lw_base  = (volatile uint8_t *)base;
+    go_regs  = lw_base + GO_PERIPHERAL_OFFSET;
     close(fd);
     return 0;
 }
@@ -106,6 +111,71 @@ static const char *stone_str(Stone s)
     return s == BLACK ? "Black" : s == WHITE ? "White" : "?";
 }
 
+/* ─── Strip score panel rendering ────────────────────────────────────────── */
+
+static void itoa2(int v, char *buf)   /* up to 3 digits, no clipping */
+{
+    if (v < 10)       { buf[0] = '0' + v;             buf[1] = 0; }
+    else if (v < 100) { buf[0] = '0' + v/10;
+                        buf[1] = '0' + v%10;          buf[2] = 0; }
+    else              { buf[0] = '0' + v/100;
+                        buf[1] = '0' + (v/10) % 10;
+                        buf[2] = '0' + v%10;          buf[3] = 0; }
+}
+
+static void render_panel(const BoardState *b)
+{
+    char num[8];
+    strip_clear(COLOR_STRIP_BG);
+
+    if (b->game_over) {
+        int blk, wht;
+        board_score(b, &blk, &wht);
+        double w_total = wht + 5.5;
+        const char *winner = (blk > w_total) ? "BLACK WINS" : "WHITE WINS";
+
+        /* "GAME OVER" big and centered (scale 3 → ~13px wide × 21 tall) */
+        strip_text(140, 4, "GAME OVER", 3,
+                   COLOR_STRIP_GOLD, COLOR_STRIP_BG);
+        /* score line below */
+        strip_text(80, 38, "B ", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+        itoa2(blk, num);
+        strip_text(108, 38, num, 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+        strip_text(160, 38, "W ", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+        itoa2(wht, num);
+        strip_text(188, 38, num, 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+        strip_text(240, 38, " 5 KOMI ", 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
+        strip_text(380, 38, winner, 2, COLOR_STRIP_GOLD, COLOR_STRIP_BG);
+    } else {
+        /* Live score line, scale 2 (12px advance). */
+        strip_text(8,   8, "BLACK:", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+        itoa2(b->captured_black, num);    /* white captured BY black? — no: */
+        /* captured_black = #black stones captured by W. Show in W's column. */
+        strip_text(180, 8, "WHITE:", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+        strip_text(360, 8, "TURN:", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+
+        strip_text(8,  32, "CAP B=", 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
+        itoa2(b->captured_black, num);
+        strip_text(92, 32, num, 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
+        strip_text(140, 32, "W=", 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
+        itoa2(b->captured_white, num);
+        strip_text(168, 32, num, 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
+
+        strip_text(440, 8,
+                   b->turn == BLACK ? "BLACK" : "WHITE",
+                   2,
+                   b->turn == BLACK ? COLOR_STRIP_WHITE : COLOR_STRIP_BURLY,
+                   COLOR_STRIP_BG);
+
+        if (b->consecutive_passes == 1) {
+            strip_text(380, 32, "1 PASS", 2,
+                       COLOR_STRIP_GREEN, COLOR_STRIP_BG);
+        }
+    }
+
+    strip_present();
+}
+
 int main(void)
 {
     /* Open keyboard + map FPGA */
@@ -113,15 +183,17 @@ int main(void)
     struct libusb_device_handle *kbd = openkeyboard(&endpoint);
     if (!kbd) { fprintf(stderr, "No USB keyboard.\n"); return 1; }
     if (hw_init() != 0) { libusb_close(kbd); return 1; }
+    strip_init(lw_base, STRIP_FB_OFFSET, GO_PERIPHERAL_OFFSET + REG_STRIP_SWAP);
 
     BoardState b;
     board_init(&b);
     hw_reset_board();
+    render_panel(&b);
 
     int cursor_row = 4, cursor_col = 4;
     hw_cursor(cursor_row, cursor_col, 1);
 
-    printf("Phase 4 PvP. Black to play.\n"
+    printf("Phase 5 PvP. Black to play.\n"
            "Controls: arrows = cursor, Enter = place,\n"
            "          Space = pass, R = restart, Esc = quit.\n");
 
@@ -160,6 +232,7 @@ int main(void)
             if (mr == MOVE_OK) {
                 hw_push_board(&b);
                 hw_cursor(cursor_row, cursor_col, 1);
+                render_panel(&b);
                 printf("%s plays (%d,%d). Captured: B=%d W=%d. %s to move.\n",
                        stone_str(moved), cursor_row, cursor_col,
                        b.captured_black, b.captured_white,
@@ -173,13 +246,13 @@ int main(void)
             if (b.game_over) { printf("Game over — press R to restart.\n"); break; }
             Stone passer = b.turn;
             board_pass(&b);
+            render_panel(&b);
             printf("%s passes (%d/2). %s to move.\n",
                    stone_str(passer), b.consecutive_passes,
                    stone_str(b.turn));
             if (b.game_over) {
                 int blk, wht;
                 board_score(&b, &blk, &wht);
-                /* Komi: White +5.5 (Chinese rules) */
                 printf("\nGAME OVER\n  Black: %d points\n  White: %d + 5.5 komi = %.1f\n",
                        blk, wht, wht + 5.5);
                 printf("  Winner: %s\n",
@@ -192,6 +265,7 @@ int main(void)
             hw_reset_board();
             cursor_row = 4; cursor_col = 4;
             hw_cursor(cursor_row, cursor_col, 1);
+            render_panel(&b);
             printf("\n--- new game ---\nBlack to move.\n");
             break;
         case KEY_ESC:
