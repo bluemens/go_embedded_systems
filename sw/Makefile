@@ -23,11 +23,11 @@ go_test: go_test.c
 go_phase3: go_phase3.c usbkeyboard.c usbkeyboard.h
 	$(CC) -O2 -Wall -o $@ go_phase3.c usbkeyboard.c -lusb-1.0
 
-# Phase 5 rule-enforced PvP with on-screen score panel.
+# Phase 7a: PvP + PvC (random / greedy / serial MCTS).
 go_main: go_main.c usbkeyboard.c usbkeyboard.h board.c board.h \
-         strip_render.c strip_render.h font5x7.c font5x7.h
+         strip_render.c strip_render.h font5x7.c font5x7.h ai.c ai.h
 	$(CC) -O2 -Wall -o $@ go_main.c usbkeyboard.c board.c \
-	      strip_render.c font5x7.c -lusb-1.0
+	      strip_render.c font5x7.c ai.c -lusb-1.0 -lm
 
 # Host-runnable unit tests for the rule engine. No HW deps; build on Mac/Linux.
 # Run `make board_test && ./board_test` from any machine, not just the DE1-SoC.

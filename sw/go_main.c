@@ -26,8 +26,10 @@
 #include <sys/mman.h>
 
 #include "board.h"
+#include "ai.h"
 #include "usbkeyboard.h"
 #include "strip_render.h"
+#include <time.h>
 
 /* ─── HW interface ───────────────────────────────────────────────────────── */
 
@@ -186,8 +188,46 @@ static void render_panel(const BoardState *b)
     strip_present();
 }
 
-int main(void)
+/* Apply an AI move to the BoardState; sync HW; print log. */
+static void apply_ai_move(BoardState *b, AiLevel level,
+                          int cursor_row, int cursor_col)
 {
+    Stone moved = b->turn;
+    int prev_caps = b->captured_black + b->captured_white;
+    Move m = ai_get_move(b, level);
+    if (m.pass) {
+        board_pass(b);
+        printf("AI (%s) passes.\n", stone_str(moved));
+    } else {
+        MoveResult r = board_place(b, m.row, m.col);
+        if (r != MOVE_OK) {
+            /* AI returned an illegal move — shouldn't happen with our
+             * legal_moves() generator, but be defensive: pass instead. */
+            board_pass(b);
+            printf("AI tried illegal (%d,%d), passes instead.\n", m.row, m.col);
+        } else {
+            int new_caps = b->captured_black + b->captured_white;
+            hw_play_audio(new_caps > prev_caps ? AUDIO_CAPTURE : AUDIO_PLACE);
+            printf("AI (%s) plays (%d,%d).\n", stone_str(moved), m.row, m.col);
+        }
+    }
+    hw_push_board(b);
+    hw_cursor(cursor_row, cursor_col, 1);
+    render_panel(b);
+}
+
+int main(int argc, char **argv)
+{
+    /* CLI: ./go_main           → PvP
+     *      ./go_main 1|2|3     → PvC, AI plays White at level N */
+    AiLevel ai_level = 0;
+    int     pvc      = 0;
+    if (argc >= 2) {
+        int n = atoi(argv[1]);
+        if (n >= 1 && n <= 3) { ai_level = (AiLevel)n; pvc = 1; }
+    }
+    ai_seed((uint32_t)time(NULL));
+
     /* Open keyboard + map FPGA */
     uint8_t endpoint;
     struct libusb_device_handle *kbd = openkeyboard(&endpoint);
@@ -203,8 +243,12 @@ int main(void)
     int cursor_row = 4, cursor_col = 4;
     hw_cursor(cursor_row, cursor_col, 1);
 
-    printf("Phase 5 PvP. Black to play.\n"
-           "Controls: arrows = cursor, Enter = place,\n"
+    if (pvc)
+        printf("Phase 7a PvC (AI = White, level %d). Black (you) to play.\n",
+               ai_level);
+    else
+        printf("Phase 7a PvP. Black to play.\n");
+    printf("Controls: arrows = cursor, Enter = place,\n"
            "          Space = pass, R = restart, Esc = quit.\n");
 
     struct usb_keyboard_packet pkt;
@@ -237,6 +281,11 @@ int main(void)
                         hw_cursor(cursor_row, cursor_col, 1); break;
         case KEY_ENTER: {
             if (b.game_over) { printf("Game over — press R to restart.\n"); break; }
+            /* In PvC, ignore Enter when it's the AI's turn. */
+            if (pvc && b.turn == WHITE) {
+                printf("AI is thinking; please wait.\n");
+                break;
+            }
             Stone moved = b.turn;
             int prev_caps = b.captured_black + b.captured_white;
             MoveResult mr = board_place(&b, cursor_row, cursor_col);
@@ -246,10 +295,15 @@ int main(void)
                 hw_cursor(cursor_row, cursor_col, 1);
                 render_panel(&b);
                 hw_play_audio(new_caps > prev_caps ? AUDIO_CAPTURE : AUDIO_PLACE);
-                printf("%s plays (%d,%d). Captured: B=%d W=%d. %s to move.\n",
+                printf("%s plays (%d,%d). Captured: B=%d W=%d.\n",
                        stone_str(moved), cursor_row, cursor_col,
-                       b.captured_black, b.captured_white,
-                       stone_str(b.turn));
+                       b.captured_black, b.captured_white);
+                /* If we're in PvC and now the AI's turn, run the AI. */
+                if (pvc && !b.game_over && b.turn == WHITE) {
+                    printf("AI (level %d) thinking...\n", ai_level);
+                    fflush(stdout);
+                    apply_ai_move(&b, ai_level, cursor_row, cursor_col);
+                }
             } else {
                 hw_play_audio(AUDIO_ILLEGAL);
                 printf("Illegal: %s\n", moveresult_str(mr));
