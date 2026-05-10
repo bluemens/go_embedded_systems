@@ -38,10 +38,9 @@ module go_peripheral(
     input  logic        chipselect,
     input  logic        write,
     input  logic [7:0]  writedata,
+    output logic [7:0]  readdata,        // for AUDIO_STATUS reads
 
     // ── avalon_slave_1: strip framebuffer write window ───────────────────
-    // 14-bit word address (covers 0..16383, only 0..9599 are valid).
-    // 32-bit data; one word holds 4 packed 8-bit palette indices.
     input  logic [13:0] strip_address,
     input  logic        strip_chipselect,
     input  logic        strip_write,
@@ -50,7 +49,12 @@ module go_peripheral(
     // VGA conduit
     output logic [7:0]  VGA_R, VGA_G, VGA_B,
     output logic        VGA_CLK, VGA_HS, VGA_VS,
-                        VGA_BLANK_n, VGA_SYNC_n
+                        VGA_BLANK_n, VGA_SYNC_n,
+
+    // ── Audio conduit (to/from codec_interface in toplevel) ──────────────
+    output logic [23:0] dac_left,
+    output logic [23:0] dac_right,
+    input  logic        advance
 );
 
     // ─── VGA timing ─────────────────────────────────────────────────────────
@@ -76,17 +80,21 @@ module go_peripheral(
     assign vsync_pulse = (VGA_VS == 1'b1) && (vs_d == 1'b0);
 
     // ─── Avalon register decoder (slave 0) ──────────────────────────────────
-    localparam logic [2:0] REG_SET_BLACK   = 3'h0;
-    localparam logic [2:0] REG_SET_WHITE   = 3'h1;
-    localparam logic [2:0] REG_CLEAR_CELL  = 3'h2;
-    localparam logic [2:0] REG_RESET_BOARD = 3'h3;
-    localparam logic [2:0] REG_CURSOR      = 3'h4;
-    localparam logic [2:0] REG_STRIP_SWAP  = 3'h5;
+    localparam logic [2:0] REG_SET_BLACK    = 3'h0;
+    localparam logic [2:0] REG_SET_WHITE    = 3'h1;
+    localparam logic [2:0] REG_CLEAR_CELL   = 3'h2;
+    localparam logic [2:0] REG_RESET_BOARD  = 3'h3;
+    localparam logic [2:0] REG_CURSOR       = 3'h4;
+    localparam logic [2:0] REG_STRIP_SWAP   = 3'h5;
+    localparam logic [2:0] REG_AUDIO_CMD    = 3'h6;
+    localparam logic [2:0] REG_AUDIO_STATUS = 3'h7;
 
     logic        bm_write_en, bm_reset_all;
     logic [6:0]  bm_write_addr;
     logic [1:0]  bm_write_data;
     logic        strip_swap_request;
+    logic        audio_cmd_valid;
+    logic [2:0]  audio_cmd_value;
 
     logic        cursor_visible;
     logic [6:0]  cursor_idx;
@@ -97,6 +105,8 @@ module go_peripheral(
         bm_write_data      = 2'b00;
         bm_reset_all       = 1'b0;
         strip_swap_request = 1'b0;
+        audio_cmd_valid    = 1'b0;
+        audio_cmd_value    = writedata[2:0];
 
         if (chipselect && write) begin
             unique case (address)
@@ -104,11 +114,21 @@ module go_peripheral(
                 REG_SET_WHITE:   begin bm_write_en = 1; bm_write_data = 2'b10; end
                 REG_CLEAR_CELL:  begin bm_write_en = 1; bm_write_data = 2'b00; end
                 REG_RESET_BOARD: bm_reset_all       = 1'b1;
-                REG_CURSOR:      ;   // handled below
+                REG_CURSOR:      ;   // handled in always_ff below
                 REG_STRIP_SWAP:  strip_swap_request = 1'b1;
+                REG_AUDIO_CMD:   audio_cmd_valid    = 1'b1;
                 default: ;
             endcase
         end
+    end
+
+    /* AUDIO_STATUS reads: bit 0 = busy. */
+    logic audio_busy;
+    always_comb begin
+        if (chipselect && !write && address == REG_AUDIO_STATUS)
+            readdata = {7'b0, audio_busy};
+        else
+            readdata = 8'h00;
     end
 
     always_ff @(posedge clk) begin
@@ -212,6 +232,18 @@ module go_peripheral(
         .vsync_pulse  (vsync_pulse),
         .pixel_addr   (strip_pixel_addr),
         .pixel_out    (strip_pixel)
+    );
+
+    // ─── Audio ──────────────────────────────────────────────────────────────
+    audio_controller ac (
+        .clk             (clk),
+        .reset           (reset),
+        .audio_cmd       (audio_cmd_value),
+        .audio_cmd_valid (audio_cmd_valid),
+        .busy            (audio_busy),
+        .advance         (advance),
+        .dac_left        (dac_left),
+        .dac_right       (dac_right)
     );
 
     // Strip palette — bottom 3 bits of the pixel byte index a small RGB table.

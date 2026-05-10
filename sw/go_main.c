@@ -36,12 +36,20 @@
 #define GO_PERIPHERAL_OFFSET  0x0000        /* avalon_slave_0 */
 #define STRIP_FB_OFFSET       0x10000       /* avalon_slave_1 (set in Qsys) */
 
-#define REG_SET_BLACK    0x00
-#define REG_SET_WHITE    0x01
-#define REG_CLEAR_CELL   0x02
-#define REG_RESET_BOARD  0x03
-#define REG_CURSOR       0x04
-#define REG_STRIP_SWAP   0x05
+#define REG_SET_BLACK     0x00
+#define REG_SET_WHITE     0x01
+#define REG_CLEAR_CELL    0x02
+#define REG_RESET_BOARD   0x03
+#define REG_CURSOR        0x04
+#define REG_STRIP_SWAP    0x05
+#define REG_AUDIO_CMD     0x06
+#define REG_AUDIO_STATUS  0x07
+
+#define AUDIO_NONE      0
+#define AUDIO_PLACE     1
+#define AUDIO_CAPTURE   2
+#define AUDIO_ILLEGAL   3
+#define AUDIO_GAME_OVER 4
 
 static volatile uint8_t *go_regs;
 static volatile uint8_t *lw_base;     /* shared with strip_render */
@@ -63,6 +71,8 @@ static inline void wr8(uint32_t off, uint8_t v) { go_regs[off] = v; }
 static inline int  cell_idx(int r, int c)       { return r * 9 + c; }
 
 static void hw_reset_board(void) { wr8(REG_RESET_BOARD, 1); }
+
+static inline void hw_play_audio(uint8_t cmd) { wr8(REG_AUDIO_CMD, cmd); }
 
 static void hw_cursor(int row, int col, int visible)
 {
@@ -228,16 +238,20 @@ int main(void)
         case KEY_ENTER: {
             if (b.game_over) { printf("Game over — press R to restart.\n"); break; }
             Stone moved = b.turn;
+            int prev_caps = b.captured_black + b.captured_white;
             MoveResult mr = board_place(&b, cursor_row, cursor_col);
             if (mr == MOVE_OK) {
+                int new_caps = b.captured_black + b.captured_white;
                 hw_push_board(&b);
                 hw_cursor(cursor_row, cursor_col, 1);
                 render_panel(&b);
+                hw_play_audio(new_caps > prev_caps ? AUDIO_CAPTURE : AUDIO_PLACE);
                 printf("%s plays (%d,%d). Captured: B=%d W=%d. %s to move.\n",
                        stone_str(moved), cursor_row, cursor_col,
                        b.captured_black, b.captured_white,
                        stone_str(b.turn));
             } else {
+                hw_play_audio(AUDIO_ILLEGAL);
                 printf("Illegal: %s\n", moveresult_str(mr));
             }
             break;
@@ -253,6 +267,7 @@ int main(void)
             if (b.game_over) {
                 int blk, wht;
                 board_score(&b, &blk, &wht);
+                hw_play_audio(AUDIO_GAME_OVER);
                 printf("\nGAME OVER\n  Black: %d points\n  White: %d + 5.5 komi = %.1f\n",
                        blk, wht, wht + 5.5);
                 printf("  Winner: %s\n",

@@ -38,9 +38,14 @@ add_fileset QUARTUS_SYNTH QUARTUS_SYNTH "" ""
 set_fileset_property QUARTUS_SYNTH TOP_LEVEL go_peripheral
 set_fileset_property QUARTUS_SYNTH ENABLE_RELATIVE_INCLUDE_PATHS false
 set_fileset_property QUARTUS_SYNTH ENABLE_FILE_OVERWRITE_MODE false
-add_fileset_file go_peripheral.sv SYSTEM_VERILOG PATH go_peripheral.sv TOP_LEVEL_FILE
-add_fileset_file board_mem.sv     SYSTEM_VERILOG PATH board_mem.sv
-add_fileset_file strip_fb.sv      SYSTEM_VERILOG PATH strip_fb.sv
+add_fileset_file go_peripheral.sv   SYSTEM_VERILOG PATH go_peripheral.sv TOP_LEVEL_FILE
+add_fileset_file board_mem.sv       SYSTEM_VERILOG PATH board_mem.sv
+add_fileset_file strip_fb.sv        SYSTEM_VERILOG PATH strip_fb.sv
+add_fileset_file audio_controller.sv SYSTEM_VERILOG PATH audio_controller.sv
+add_fileset_file place.vh           OTHER          PATH place.vh
+add_fileset_file capture.vh         OTHER          PATH capture.vh
+add_fileset_file illegal.vh         OTHER          PATH illegal.vh
+add_fileset_file gameover.vh        OTHER          PATH gameover.vh
 
 # ─── Clock sink ──────────────────────────────────────────────────────────────
 add_interface clock clock end
@@ -76,10 +81,11 @@ set_interface_property avalon_slave_0 setupTime                     0
 set_interface_property avalon_slave_0 timingUnits                   Cycles
 set_interface_property avalon_slave_0 writeWaitTime                 0
 set_interface_property avalon_slave_0 ENABLED                       true
-add_interface_port avalon_slave_0 writedata   writedata   Input 8
-add_interface_port avalon_slave_0 write       write       Input 1
-add_interface_port avalon_slave_0 chipselect  chipselect  Input 1
-add_interface_port avalon_slave_0 address     address     Input 3
+add_interface_port avalon_slave_0 writedata   writedata   Input  8
+add_interface_port avalon_slave_0 write       write       Input  1
+add_interface_port avalon_slave_0 chipselect  chipselect  Input  1
+add_interface_port avalon_slave_0 address     address     Input  3
+add_interface_port avalon_slave_0 readdata    readdata    Output 8
 set_interface_assignment avalon_slave_0 embeddedsw.configuration.isFlash             0
 set_interface_assignment avalon_slave_0 embeddedsw.configuration.isMemoryDevice      0
 set_interface_assignment avalon_slave_0 embeddedsw.configuration.isNonVolatileStorage 0
@@ -128,3 +134,16 @@ add_interface_port vga VGA_HS      hs      Output 1
 add_interface_port vga VGA_R       r       Output 8
 add_interface_port vga VGA_SYNC_n  sync_n  Output 1
 add_interface_port vga VGA_VS      vs      Output 1
+
+# ─── Audio conduit ──────────────────────────────────────────────────────────
+# go_peripheral talks to a `codec_interface` instance in the toplevel (NOT in
+# Qsys) — codec_interface drives the AUD_*/FPGA_I2C_* board pins directly.
+# Through Qsys we just expose the dac_*/advance signals to the toplevel so
+# they can be wired up.
+add_interface audio conduit end
+set_interface_property audio associatedClock clock
+set_interface_property audio associatedReset ""
+set_interface_property audio ENABLED         true
+add_interface_port audio dac_left  dac_left  Output 24
+add_interface_port audio dac_right dac_right Output 24
+add_interface_port audio advance   advance   Input  1
