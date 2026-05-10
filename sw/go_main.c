@@ -1,20 +1,18 @@
 /*
- * go_main.c — Phase 4: rule-enforced PvP game on the DE1-SoC
+ * go_main.c — Phase 8: full game flow
  *
- * Same loop shape as go_phase3.c but with board_place() in the path:
- *   keyboard ── arrow ──▶ cursor move
- *           ── Enter ──▶ board_place() → on MOVE_OK, push entire board to HW
- *           ── Space ──▶ board_pass()
- *           ── R     ──▶ board_init() + reset HW + redraw cursor
- *           ── Esc   ──▶ quit
+ * UI state machine:
+ *   TITLE          → "GO 9x9 — Press ENTER to start"
+ *   MODE_SELECT    → PvP / PvC (left/right + Enter)
+ *   DIFFICULTY_SEL → Level 1 / 2 / 3 (PvC only)
+ *   GAME           → live game, Phase 4–7 logic, score panel updates
  *
- * Captures, ko, and suicide are all enforced by board.c. After a successful
- * move, all 81 cells are written to the FPGA tilemap (~6 µs total). This is
- * pessimistic — only changed cells need writing — but it's simple and the
- * timing budget is fine.
+ * Esc quits from any state. R restarts back to TITLE from GAME / GAME_OVER.
  *
- * No game-over screen yet (Phase 5 strip framebuffer); on two passes we just
- * compute and print the score, then keep the game in over state until R.
+ * argv shortcut: ./go_main [N]
+ *   N absent     → start at TITLE
+ *   N=1/2/3      → skip menus; PvC at that level
+ *   N=0          → skip menus; PvP
  */
 
 #include <stdio.h>
@@ -135,6 +133,44 @@ static void itoa2(int v, char *buf)   /* up to 3 digits, no clipping */
                         buf[2] = '0' + v%10;          buf[3] = 0; }
 }
 
+/* ─── Menu screens ──────────────────────────────────────────────────────── */
+
+static void render_title(void)
+{
+    strip_clear(COLOR_STRIP_BG);
+    /* Banner: "GO 9X9" centered, scale 4 → 5*4=20 wide × 7*4=28 tall.
+     * 6 chars × (5+1)*4 = 144 px wide; centered at x = (640-144)/2 = 248. */
+    strip_text(248, 4, "GO 9X9", 4, COLOR_STRIP_GOLD, COLOR_STRIP_BG);
+    strip_text(180, 42, "PRESS ENTER", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+    strip_present();
+}
+
+static void render_mode_select(int sel /* 0=PvP, 1=PvC */)
+{
+    strip_clear(COLOR_STRIP_BG);
+    strip_text(140, 4, "SELECT MODE", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+    /* Two options at scale 3, ~30 px advance each, ~30 px tall. */
+    int x_pvp = 140, x_pvc = 360, y = 28;
+    uint8_t cpvp = sel == 0 ? COLOR_STRIP_GREEN : COLOR_STRIP_GRAY;
+    uint8_t cpvc = sel == 1 ? COLOR_STRIP_GREEN : COLOR_STRIP_GRAY;
+    strip_text(x_pvp, y, "PVP", 3, cpvp, COLOR_STRIP_BG);
+    strip_text(x_pvc, y, "PVC", 3, cpvc, COLOR_STRIP_BG);
+    strip_present();
+}
+
+static void render_difficulty(int sel /* 0..2 */)
+{
+    strip_clear(COLOR_STRIP_BG);
+    strip_text(180, 4, "AI DIFFICULTY", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+    int x[3] = { 100, 290, 480 };
+    const char *labels[3] = { "L1", "L2", "L3" };
+    for (int i = 0; i < 3; i++) {
+        uint8_t col = (sel == i) ? COLOR_STRIP_GREEN : COLOR_STRIP_GRAY;
+        strip_text(x[i], 28, labels[i], 3, col, COLOR_STRIP_BG);
+    }
+    strip_present();
+}
+
 static void render_panel(const BoardState *b)
 {
     char num[8];
@@ -216,15 +252,52 @@ static void apply_ai_move(BoardState *b, AiLevel level,
     render_panel(b);
 }
 
+typedef enum {
+    UI_TITLE,
+    UI_MODE_SELECT,
+    UI_DIFFICULTY,
+    UI_GAME,
+} UiState;
+
+/* Helpers to enter each state cleanly (resets HW + redraws strip). */
+static void enter_title(void)
+{
+    hw_reset_board();
+    hw_cursor(0, 0, 0);
+    render_title();
+}
+static void enter_mode_select(int sel)
+{
+    hw_reset_board();
+    hw_cursor(0, 0, 0);
+    render_mode_select(sel);
+}
+static void enter_difficulty(int sel)
+{
+    render_difficulty(sel);
+}
+static void enter_game(BoardState *b, int *crow, int *ccol)
+{
+    board_init(b);
+    hw_reset_board();
+    *crow = 4; *ccol = 4;
+    hw_cursor(*crow, *ccol, 1);
+    render_panel(b);
+}
+
 int main(int argc, char **argv)
 {
-    /* CLI: ./go_main           → PvP
-     *      ./go_main 1|2|3     → PvC, AI plays White at level N */
-    AiLevel ai_level = 0;
-    int     pvc      = 0;
+    /* CLI shortcuts:
+     *   no arg     → start at TITLE menu
+     *   0          → skip menus, PvP
+     *   1 / 2 / 3  → skip menus, PvC at level N */
+    AiLevel ai_level    = 0;
+    int     pvc         = 0;
+    int     skip_menu   = 0;
     if (argc >= 2) {
         int n = atoi(argv[1]);
-        if (n >= 1 && n <= 3) { ai_level = (AiLevel)n; pvc = 1; }
+        if (n == 0)                  { skip_menu = 1; pvc = 0; }
+        else if (n >= 1 && n <= 3)   { skip_menu = 1; pvc = 1; ai_level = (AiLevel)n; }
     }
     ai_seed((uint32_t)time(NULL));
 
@@ -236,20 +309,23 @@ int main(int argc, char **argv)
     strip_init(lw_base, STRIP_FB_OFFSET, GO_PERIPHERAL_OFFSET + REG_STRIP_SWAP);
 
     BoardState b;
-    board_init(&b);
-    hw_reset_board();
-    render_panel(&b);
-
     int cursor_row = 4, cursor_col = 4;
-    hw_cursor(cursor_row, cursor_col, 1);
+    int mode_sel = 0;          /* 0 = PvP, 1 = PvC */
+    int diff_sel = 1;          /* 0..2 → level 1..3 */
+    UiState ui;
 
-    if (pvc)
-        printf("Phase 7a PvC (AI = White, level %d). Black (you) to play.\n",
+    if (skip_menu) {
+        ui = UI_GAME;
+        enter_game(&b, &cursor_row, &cursor_col);
+        printf(pvc
+               ? "PvC (AI=White, level %d). Black (you) to play.\n"
+               : "PvP. Black to play.\n",
                ai_level);
-    else
-        printf("Phase 7a PvP. Black to play.\n");
-    printf("Controls: arrows = cursor, Enter = place,\n"
-           "          Space = pass, R = restart, Esc = quit.\n");
+    } else {
+        ui = UI_TITLE;
+        enter_title();
+        printf("Phase 8: title menu. Enter to start, Esc to quit.\n");
+    }
 
     struct usb_keyboard_packet pkt;
     int xferred;
@@ -270,76 +346,124 @@ int main(int argc, char **argv)
         prev_key = key;
         if (key == 0) continue;
 
-        switch (key) {
-        case KEY_UP:    cursor_row = clamp(cursor_row - 1, 0, 8);
-                        hw_cursor(cursor_row, cursor_col, 1); break;
-        case KEY_DOWN:  cursor_row = clamp(cursor_row + 1, 0, 8);
-                        hw_cursor(cursor_row, cursor_col, 1); break;
-        case KEY_LEFT:  cursor_col = clamp(cursor_col - 1, 0, 8);
-                        hw_cursor(cursor_row, cursor_col, 1); break;
-        case KEY_RIGHT: cursor_col = clamp(cursor_col + 1, 0, 8);
-                        hw_cursor(cursor_row, cursor_col, 1); break;
-        case KEY_ENTER: {
-            if (b.game_over) { printf("Game over — press R to restart.\n"); break; }
-            /* In PvC, ignore Enter when it's the AI's turn. */
-            if (pvc && b.turn == WHITE) {
-                printf("AI is thinking; please wait.\n");
+        if (key == KEY_ESC) {
+            if (ui == UI_TITLE || ui == UI_GAME) goto done;
+            if (ui == UI_MODE_SELECT) { ui = UI_TITLE; enter_title(); continue; }
+            if (ui == UI_DIFFICULTY)  { ui = UI_MODE_SELECT;
+                                        enter_mode_select(mode_sel); continue; }
+        }
+
+        switch (ui) {
+        /* ─────────────── TITLE ─────────────── */
+        case UI_TITLE:
+            if (key == KEY_ENTER) {
+                ui = UI_MODE_SELECT;
+                enter_mode_select(mode_sel);
+            }
+            break;
+
+        /* ─────────────── MODE_SELECT ─────────────── */
+        case UI_MODE_SELECT:
+            if (key == KEY_LEFT)  { mode_sel = 0; render_mode_select(mode_sel); }
+            if (key == KEY_RIGHT) { mode_sel = 1; render_mode_select(mode_sel); }
+            if (key == KEY_ENTER) {
+                if (mode_sel == 0) {
+                    pvc = 0; ai_level = 0;
+                    ui = UI_GAME;
+                    enter_game(&b, &cursor_row, &cursor_col);
+                    printf("\nPvP. Black to play.\n");
+                } else {
+                    ui = UI_DIFFICULTY;
+                    enter_difficulty(diff_sel);
+                }
+            }
+            break;
+
+        /* ─────────────── DIFFICULTY ─────────────── */
+        case UI_DIFFICULTY:
+            if (key == KEY_LEFT  && diff_sel > 0) { diff_sel--; render_difficulty(diff_sel); }
+            if (key == KEY_RIGHT && diff_sel < 2) { diff_sel++; render_difficulty(diff_sel); }
+            if (key == KEY_ENTER) {
+                pvc = 1; ai_level = (AiLevel)(diff_sel + 1);
+                ui = UI_GAME;
+                enter_game(&b, &cursor_row, &cursor_col);
+                printf("\nPvC (AI=White, level %d). Black to play.\n", ai_level);
+            }
+            break;
+
+        /* ─────────────── GAME ─────────────── */
+        case UI_GAME:
+            switch (key) {
+            case KEY_UP:    cursor_row = clamp(cursor_row - 1, 0, 8);
+                            hw_cursor(cursor_row, cursor_col, 1); break;
+            case KEY_DOWN:  cursor_row = clamp(cursor_row + 1, 0, 8);
+                            hw_cursor(cursor_row, cursor_col, 1); break;
+            case KEY_LEFT:  cursor_col = clamp(cursor_col - 1, 0, 8);
+                            hw_cursor(cursor_row, cursor_col, 1); break;
+            case KEY_RIGHT: cursor_col = clamp(cursor_col + 1, 0, 8);
+                            hw_cursor(cursor_row, cursor_col, 1); break;
+            case KEY_ENTER: {
+                if (b.game_over) { printf("Game over — press R to return to menu.\n"); break; }
+                if (pvc && b.turn == WHITE) {
+                    printf("AI is thinking; please wait.\n");
+                    break;
+                }
+                Stone moved = b.turn;
+                int prev_caps = b.captured_black + b.captured_white;
+                MoveResult mr = board_place(&b, cursor_row, cursor_col);
+                if (mr == MOVE_OK) {
+                    int new_caps = b.captured_black + b.captured_white;
+                    hw_push_board(&b);
+                    hw_cursor(cursor_row, cursor_col, 1);
+                    render_panel(&b);
+                    hw_play_audio(new_caps > prev_caps ? AUDIO_CAPTURE : AUDIO_PLACE);
+                    printf("%s plays (%d,%d). Captured: B=%d W=%d.\n",
+                           stone_str(moved), cursor_row, cursor_col,
+                           b.captured_black, b.captured_white);
+                    if (pvc && !b.game_over && b.turn == WHITE) {
+                        printf("AI (level %d) thinking...\n", ai_level);
+                        fflush(stdout);
+                        apply_ai_move(&b, ai_level, cursor_row, cursor_col);
+                    }
+                } else {
+                    hw_play_audio(AUDIO_ILLEGAL);
+                    printf("Illegal: %s\n", moveresult_str(mr));
+                }
                 break;
             }
-            Stone moved = b.turn;
-            int prev_caps = b.captured_black + b.captured_white;
-            MoveResult mr = board_place(&b, cursor_row, cursor_col);
-            if (mr == MOVE_OK) {
-                int new_caps = b.captured_black + b.captured_white;
-                hw_push_board(&b);
-                hw_cursor(cursor_row, cursor_col, 1);
+            case KEY_SPACE: {
+                if (b.game_over) { printf("Game over — press R to return to menu.\n"); break; }
+                Stone passer = b.turn;
+                board_pass(&b);
                 render_panel(&b);
-                hw_play_audio(new_caps > prev_caps ? AUDIO_CAPTURE : AUDIO_PLACE);
-                printf("%s plays (%d,%d). Captured: B=%d W=%d.\n",
-                       stone_str(moved), cursor_row, cursor_col,
-                       b.captured_black, b.captured_white);
-                /* If we're in PvC and now the AI's turn, run the AI. */
-                if (pvc && !b.game_over && b.turn == WHITE) {
-                    printf("AI (level %d) thinking...\n", ai_level);
-                    fflush(stdout);
-                    apply_ai_move(&b, ai_level, cursor_row, cursor_col);
+                printf("%s passes (%d/2). %s to move.\n",
+                       stone_str(passer), b.consecutive_passes,
+                       stone_str(b.turn));
+                if (b.game_over) {
+                    int blk, wht;
+                    board_score(&b, &blk, &wht);
+                    hw_play_audio(AUDIO_GAME_OVER);
+                    printf("\nGAME OVER\n  Black: %d points\n  White: %d + 5.5 komi = %.1f\n",
+                           blk, wht, wht + 5.5);
+                    printf("  Winner: %s\n",
+                           (blk > wht + 5.5) ? "Black" : "White");
                 }
-            } else {
-                hw_play_audio(AUDIO_ILLEGAL);
-                printf("Illegal: %s\n", moveresult_str(mr));
+                break;
             }
-            break;
-        }
-        case KEY_SPACE: {
-            if (b.game_over) { printf("Game over — press R to restart.\n"); break; }
-            Stone passer = b.turn;
-            board_pass(&b);
-            render_panel(&b);
-            printf("%s passes (%d/2). %s to move.\n",
-                   stone_str(passer), b.consecutive_passes,
-                   stone_str(b.turn));
-            if (b.game_over) {
-                int blk, wht;
-                board_score(&b, &blk, &wht);
-                hw_play_audio(AUDIO_GAME_OVER);
-                printf("\nGAME OVER\n  Black: %d points\n  White: %d + 5.5 komi = %.1f\n",
-                       blk, wht, wht + 5.5);
-                printf("  Winner: %s\n",
-                       (blk > wht + 5.5) ? "Black" : "White");
+            case KEY_R:
+                /* From GAME / GAME_OVER: back to TITLE menu (or skip back to
+                 * GAME if launched with the argv shortcut). */
+                if (skip_menu) {
+                    enter_game(&b, &cursor_row, &cursor_col);
+                    printf("\n--- new game ---\n");
+                } else {
+                    ui = UI_TITLE;
+                    enter_title();
+                    printf("\n--- back to menu ---\n");
+                }
+                break;
+            default: break;
             }
-            break;
-        }
-        case KEY_R:
-            board_init(&b);
-            hw_reset_board();
-            cursor_row = 4; cursor_col = 4;
-            hw_cursor(cursor_row, cursor_col, 1);
-            render_panel(&b);
-            printf("\n--- new game ---\nBlack to move.\n");
-            break;
-        case KEY_ESC:
-            goto done;
-        default:
             break;
         }
     }
