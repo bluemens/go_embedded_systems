@@ -1,0 +1,20 @@
+CC = gcc
+CFLAGS = -Wall -Wextra -g
+INCLUDES = -I.
+
+SRCS = physics.c main.c
+OBJS = $(SRCS:.c=.o)
+TARGET = physics_game
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^
+
+%.o: %.c
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+clean:
+	rm -f $(OBJS) $(TARGET) 
