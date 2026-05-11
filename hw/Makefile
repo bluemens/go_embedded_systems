@@ -71,11 +71,25 @@ $(QPF) $(QSF) $(SDC) : $(TCL) $(HPS_PIN_TCL)
 #
 # From the .qsys file, generate the .sopcinfo, .qip, and directory
 # (named according to the system) with all the Verilog files, etc.
+#
+# IP_SOURCES are the source files referenced by go_peripheral_hw.tcl as
+# fileset entries. qsys-generate copies them into
+# soc_system/synthesis/submodules/ at generation time, and Quartus reads
+# from those copies. Listing them here forces re-generation when any of
+# them change — without these dependencies, edits to (e.g.) strip_fb.sv
+# would silently NOT propagate to the next compile.
+
+IP_SOURCES = go_peripheral_hw.tcl \
+             go_peripheral.sv \
+             board_mem.sv \
+             strip_fb.sv \
+             audio_controller.sv \
+             place.vh capture.vh illegal.vh gameover.vh
 
 .PHONY : qsys
 qsys : $(SOPCINFO)
 
-$(SOPCINFO) $(QIP) $(HPS_PIN_TCL) $(SYSTEM)/ $(PRELOADER_SETTINGS_DIR) : $(QSYS)
+$(SOPCINFO) $(QIP) $(HPS_PIN_TCL) $(SYSTEM)/ $(PRELOADER_SETTINGS_DIR) : $(QSYS) $(IP_SOURCES)
 	rm -rf $(SOPCINFO) $(SYSTEM)/
 	qsys-generate $(QSYS) --synthesis=VERILOG
 

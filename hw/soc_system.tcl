@@ -38,6 +38,35 @@ foreach filename $qip {
     set_global_assignment -name QIP_FILE $filename
 }
 
+# Phase 6: codec_interface bundle (Altera-UP audio core).
+# These files live at the FPGA fabric (toplevel), NOT inside Qsys.
+# codec_interface.sv drives the AUD_*/FPGA_I2C_* board pins directly and
+# exposes a 48 kHz "advance" strobe to our audio_controller.
+#
+# Adding these here (rather than appending to soc_system.qsf manually) means
+# they survive any regeneration of the project file via `quartus_sh -t
+# soc_system.tcl`.
+set_global_assignment -name SEARCH_PATH "codec_interface"
+set_global_assignment -name SYSTEMVERILOG_FILE codec_interface/codec_interface.sv
+set_global_assignment -name VERILOG_FILE codec_interface/audio_codec.v
+set_global_assignment -name VERILOG_FILE codec_interface/audio_and_video_config.v
+set_global_assignment -name VERILOG_FILE codec_interface/clock_generator.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_Audio_Bit_Counter.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_Audio_In_Deserializer.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_Audio_Out_Serializer.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_Clock_Edge.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_I2C.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_I2C_AV_Auto_Initialize.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_I2C_DC_Auto_Initialize.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_I2C_LCM_Auto_Initialize.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_Slow_Clock_Generator.v
+set_global_assignment -name VERILOG_FILE codec_interface/Altera_UP_SYNC_FIFO.v
+set_global_assignment -name VERILOG_FILE codec_interface/xck_generator.v
+# The .qip below provides PLL_* instance assignments but does NOT pull in the
+# generated Verilog itself, so xck_generator_0002.v must be added explicitly.
+set_global_assignment -name VERILOG_FILE codec_interface/xck_generator/xck_generator_0002.v
+set_global_assignment -name QIP_FILE codec_interface/xck_generator/xck_generator_0002.qip
+
 # FPGA pin assignments
 
 foreach {pin port} {
