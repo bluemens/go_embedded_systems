@@ -266,8 +266,48 @@ module soc_system_top(
      .hps_hps_io_gpio_inst_GPIO48  ( HPS_I2C_CONTROL ),
      .hps_hps_io_gpio_inst_GPIO53  ( HPS_LED ),
      .hps_hps_io_gpio_inst_GPIO54  ( HPS_KEY ),
-     .hps_hps_io_gpio_inst_GPIO61  ( HPS_GSENSOR_INT )
+     .hps_hps_io_gpio_inst_GPIO61  ( HPS_GSENSOR_INT ),
+
+     // Phase 1 + Phase 5: VGA conduit
+     .vga_r       (VGA_R),
+     .vga_g       (VGA_G),
+     .vga_b       (VGA_B),
+     .vga_clk     (VGA_CLK),
+     .vga_hs      (VGA_HS),
+     .vga_vs      (VGA_VS),
+     .vga_blank_n (VGA_BLANK_N),
+     .vga_sync_n  (VGA_SYNC_N),
+
+     // Phase 6: audio conduit (wired to codec_interface below)
+     .audio_dac_left  (aud_dac_left),
+     .audio_dac_right (aud_dac_right),
+     .audio_advance   (aud_advance)
   );
+
+   /* Phase 6: Audio CODEC wrapper (Altera-UP, sits at toplevel, NOT in Qsys).
+    * codec_interface drives AUD_*/FPGA_I2C_* board pins directly and exposes
+    * a 48 kHz sample-rate "advance" strobe to our audio_controller. */
+   wire [23:0] aud_dac_left, aud_dac_right;
+   wire [23:0] aud_adc_left_unused, aud_adc_right_unused;
+   wire        aud_advance;
+
+   codec_interface codec_inst (
+       .CLOCK_50      (CLOCK_50),
+       .reset         (1'b0),
+       .dac_left      (aud_dac_left),
+       .dac_right     (aud_dac_right),
+       .adc_left      (aud_adc_left_unused),
+       .adc_right     (aud_adc_right_unused),
+       .advance       (aud_advance),
+       .FPGA_I2C_SCLK (FPGA_I2C_SCLK),
+       .FPGA_I2C_SDAT (FPGA_I2C_SDAT),
+       .AUD_XCK       (AUD_XCK),
+       .AUD_DACLRCK   (AUD_DACLRCK),
+       .AUD_ADCLRCK   (AUD_ADCLRCK),
+       .AUD_BCLK      (AUD_BCLK),
+       .AUD_ADCDAT    (AUD_ADCDAT),
+       .AUD_DACDAT    (AUD_DACDAT)
+   );
 
    // The following quiet the "no driver" warnings for output
    // pins and should be removed if you use any of these peripherals
@@ -276,12 +316,6 @@ module soc_system_top(
    assign ADC_DIN = SW[0];
    assign ADC_SCLK = SW[0];
    
-   assign AUD_ADCLRCK = SW[1] ? SW[0] : 1'bZ;
-   assign AUD_BCLK = SW[1] ? SW[0] : 1'bZ;
-   assign AUD_DACDAT = SW[0];
-   assign AUD_DACLRCK = SW[1] ? SW[0] : 1'bZ;
-   assign AUD_XCK = SW[0];      
-
    assign DRAM_ADDR = { 13{ SW[0] } };
    assign DRAM_BA = { 2{ SW[0] } };
    assign DRAM_DQ = SW[1] ? { 16{ SW[0] } } : { 16{ 1'bZ } };
@@ -289,9 +323,6 @@ module soc_system_top(
 	   DRAM_LDQM, DRAM_RAS_N, DRAM_UDQM, DRAM_WE_N} = { 8{SW[0]} };
 
    assign FAN_CTRL = SW[0];
-
-   assign FPGA_I2C_SCLK = SW[0];
-   assign FPGA_I2C_SDAT = SW[1] ? SW[0] : 1'bZ;
 
    assign GPIO_0 = SW[1] ? { 36{ SW[0] } } : { 36{ 1'bZ } };
    assign GPIO_1 = SW[1] ? { 36{ SW[0] } } : { 36{ 1'bZ } };   
@@ -314,9 +345,4 @@ module soc_system_top(
 
    assign TD_RESET_N = SW[0];
 
-   assign {VGA_R, VGA_G, VGA_B} = { 24{ SW[0] } };
-   assign {VGA_BLANK_N, VGA_CLK,
-	   VGA_HS, VGA_SYNC_N, VGA_VS} = { 5{ SW[0] } };
-
-							          
 endmodule
