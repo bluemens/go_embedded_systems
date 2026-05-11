@@ -284,9 +284,9 @@ module soc_system_top(
      .audio_advance   (aud_advance)
   );
 
-   /* Phase 6: Audio CODEC wrapper (Altera-UP, sits at toplevel, NOT in Qsys).
-    * codec_interface drives AUD_*/FPGA_I2C_* board pins directly and exposes
-    * a 48 kHz sample-rate "advance" strobe to our audio_controller. */
+   // Phase 6: Audio CODEC wrapper (Altera-UP, sits at toplevel, NOT in Qsys).
+   // codec_interface drives AUD_x and FPGA_I2C_x board pins directly and
+   // exposes a 48 kHz sample-rate "advance" strobe to our audio_controller.
    wire [23:0] aud_dac_left, aud_dac_right;
    wire [23:0] aud_adc_left_unused, aud_adc_right_unused;
    wire        aud_advance;
