@@ -80,6 +80,35 @@ void strip_text(int x, int y, const char *s, int scale,
     }
 }
 
+int strip_text_width(const char *s, int scale)
+{
+    if (scale < 1) scale = 1;
+    int n = 0;
+    for (const char *p = s; *p; p++) n++;
+    if (n == 0) return 0;
+    return n * FONT_W * scale + (n - 1) * scale;
+}
+
+void strip_text_centered(int y, const char *s, int scale,
+                         uint8_t fg, uint8_t bg)
+{
+    int w = strip_text_width(s, scale);
+    int x = (STRIP_W - w) / 2;
+    if (x < 0) x = 0;
+    strip_text(x, y, s, scale, fg, bg);
+}
+
+void strip_text_box(int x, int y, const char *s, int scale,
+                    uint8_t fg, uint8_t bg, int pad)
+{
+    if (scale < 1) scale = 1;
+    if (pad   < 0) pad   = 0;
+    int tw = strip_text_width(s, scale);
+    int th = FONT_H * scale;
+    strip_rect(x, y, tw + 2 * pad, th + 2 * pad, bg);
+    strip_text(x + pad, y + pad, s, scale, fg, bg);
+}
+
 void strip_present(void)
 {
     /* Push 9,600 32-bit words to the back buffer. Each word holds 4 packed

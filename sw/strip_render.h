@@ -47,6 +47,20 @@ void strip_char(int x, int y, char c, int scale, uint8_t fg, uint8_t bg);
 void strip_text(int x, int y, const char *s, int scale,
                 uint8_t fg, uint8_t bg);
 
+/* Pixel width of `s` painted at `scale`. Matches strip_text exactly: N chars
+ * occupy N*FONT_W*scale + (N-1)*scale pixels (no trailing inter-char gap). */
+int  strip_text_width(const char *s, int scale);
+
+/* strip_text with the start-x computed so the string is horizontally centered
+ * in the 640-px-wide strip. Clamps x ≥ 0 if the string overflows. */
+void strip_text_centered(int y, const char *s, int scale,
+                         uint8_t fg, uint8_t bg);
+
+/* Filled `bg`-colored box sized to fit `s` plus `pad` px of padding on every
+ * side, with `s` painted on top in `fg`. Use for "selected" pills on menus. */
+void strip_text_box(int x, int y, const char *s, int scale,
+                    uint8_t fg, uint8_t bg, int pad);
+
 /* Push the local buffer to FPGA (9,600 word writes, ~770 µs at 50 MHz LW)
  * and arm a vsync-aligned swap. After this returns, the next VS pulse
  * makes the new contents visible. */

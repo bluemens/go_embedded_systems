@@ -121,104 +121,114 @@ static const char *stone_str(Stone s)
     return s == BLACK ? "Black" : s == WHITE ? "White" : "?";
 }
 
-/* ─── Strip score panel rendering ────────────────────────────────────────── */
-
-static void itoa2(int v, char *buf)   /* up to 3 digits, no clipping */
-{
-    if (v < 10)       { buf[0] = '0' + v;             buf[1] = 0; }
-    else if (v < 100) { buf[0] = '0' + v/10;
-                        buf[1] = '0' + v%10;          buf[2] = 0; }
-    else              { buf[0] = '0' + v/100;
-                        buf[1] = '0' + (v/10) % 10;
-                        buf[2] = '0' + v%10;          buf[3] = 0; }
-}
-
 /* ─── Menu screens ──────────────────────────────────────────────────────── */
+
+/* Center one option of an N-option row at fixed slot `i` of `n` slots,
+ * spaced evenly across the strip. Returns the x coordinate at which to
+ * begin painting a glyph or box of width `item_w`. */
+static int slot_x(int i, int n, int item_w)
+{
+    /* Slot center: STRIP_W * (i + 0.5) / n. */
+    int center = (STRIP_W * (2 * i + 1)) / (2 * n);
+    return center - item_w / 2;
+}
 
 static void render_title(void)
 {
     strip_clear(COLOR_STRIP_BG);
-    /* Banner: "GO 9X9" centered, scale 4 → 5*4=20 wide × 7*4=28 tall.
-     * 6 chars × (5+1)*4 = 144 px wide; centered at x = (640-144)/2 = 248. */
-    strip_text(248, 4, "GO 9X9", 4, COLOR_STRIP_GOLD, COLOR_STRIP_BG);
-    strip_text(180, 42, "PRESS ENTER", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+    strip_text_centered(2,  "GO 9X9",      5, COLOR_STRIP_GOLD,  COLOR_STRIP_BG);
+    strip_text_centered(46, "PRESS ENTER", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
     strip_present();
+}
+
+/* Paint one menu option at slot (i,n). When `selected`, draws a filled gold
+ * pill (dark text on gold bg); otherwise plain white-on-bg. */
+static void draw_menu_option(int i, int n, int y, const char *label,
+                             int scale, int selected)
+{
+    int pad = 4;
+    int w   = strip_text_width(label, scale) + 2 * pad;
+    int x   = slot_x(i, n, w);
+    if (selected) {
+        strip_text_box(x, y, label, scale,
+                       COLOR_STRIP_BG, COLOR_STRIP_GOLD, pad);
+    } else {
+        strip_text(x + pad, y + pad, label, scale,
+                   COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+    }
 }
 
 static void render_mode_select(int sel /* 0=PvP, 1=PvC */)
 {
     strip_clear(COLOR_STRIP_BG);
-    strip_text(140, 4, "SELECT MODE", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
-    /* Two options at scale 3, ~30 px advance each, ~30 px tall. */
-    int x_pvp = 140, x_pvc = 360, y = 28;
-    uint8_t cpvp = sel == 0 ? COLOR_STRIP_GREEN : COLOR_STRIP_GRAY;
-    uint8_t cpvc = sel == 1 ? COLOR_STRIP_GREEN : COLOR_STRIP_GRAY;
-    strip_text(x_pvp, y, "PVP", 3, cpvp, COLOR_STRIP_BG);
-    strip_text(x_pvc, y, "PVC", 3, cpvc, COLOR_STRIP_BG);
+    strip_text_centered(2, "SELECT MODE", 2,
+                        COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+    draw_menu_option(0, 2, 18, "PVP", 3, sel == 0);
+    draw_menu_option(1, 2, 18, "PVC", 3, sel == 1);
+    strip_text_centered(52, "<- -> SELECT   ENTER OK   ESC BACK", 1,
+                        COLOR_STRIP_GRAY, COLOR_STRIP_BG);
     strip_present();
 }
 
 static void render_difficulty(int sel /* 0..2 */)
 {
     strip_clear(COLOR_STRIP_BG);
-    strip_text(180, 4, "AI DIFFICULTY", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
-    int x[3] = { 100, 290, 480 };
+    strip_text_centered(2, "AI DIFFICULTY", 2,
+                        COLOR_STRIP_WHITE, COLOR_STRIP_BG);
     const char *labels[3] = { "L1", "L2", "L3" };
-    for (int i = 0; i < 3; i++) {
-        uint8_t col = (sel == i) ? COLOR_STRIP_GREEN : COLOR_STRIP_GRAY;
-        strip_text(x[i], 28, labels[i], 3, col, COLOR_STRIP_BG);
-    }
+    for (int i = 0; i < 3; i++)
+        draw_menu_option(i, 3, 18, labels[i], 3, sel == i);
+    strip_text_centered(52, "<- -> SELECT   ENTER OK   ESC BACK", 1,
+                        COLOR_STRIP_GRAY, COLOR_STRIP_BG);
     strip_present();
 }
 
 static void render_panel(const BoardState *b)
 {
-    char num[8];
+    char buf[64];
     strip_clear(COLOR_STRIP_BG);
 
     if (b->game_over) {
         int blk, wht;
         board_score(b, &blk, &wht);
         double w_total = wht + 5.5;
-        const char *winner = (blk > w_total) ? "BLACK WINS" : "WHITE WINS";
+        const char *winner = (blk > w_total) ? "BLACK" : "WHITE";
 
-        /* "GAME OVER" big and centered (scale 3 → ~13px wide × 21 tall) */
-        strip_text(140, 4, "GAME OVER", 3,
-                   COLOR_STRIP_GOLD, COLOR_STRIP_BG);
-        /* score line below */
-        strip_text(80, 38, "B ", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
-        itoa2(blk, num);
-        strip_text(108, 38, num, 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
-        strip_text(160, 38, "W ", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
-        itoa2(wht, num);
-        strip_text(188, 38, num, 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
-        strip_text(240, 38, " 5 KOMI ", 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
-        strip_text(380, 38, winner, 2, COLOR_STRIP_GOLD, COLOR_STRIP_BG);
+        strip_text_centered(2, "GAME OVER", 3,
+                            COLOR_STRIP_GOLD, COLOR_STRIP_BG);
+        snprintf(buf, sizeof(buf),
+                 "BLACK %d   WHITE %d+5.5   WINNER %s",
+                 blk, wht, winner);
+        strip_text_centered(30, buf, 2,
+                            COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+        strip_text_centered(52, "PRESS R NEW GAME   ESC QUIT", 1,
+                            COLOR_STRIP_GRAY, COLOR_STRIP_BG);
     } else {
-        /* Live score line, scale 2 (12px advance). */
-        strip_text(8,   8, "BLACK:", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
-        itoa2(b->captured_black, num);    /* white captured BY black? — no: */
-        /* captured_black = #black stones captured by W. Show in W's column. */
-        strip_text(180, 8, "WHITE:", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
-        strip_text(360, 8, "TURN:", 2, COLOR_STRIP_WHITE, COLOR_STRIP_BG);
+        /* Row 1 (y=4): turn indicator, prominent. */
+        snprintf(buf, sizeof(buf), "TURN  %s",
+                 b->turn == BLACK ? "BLACK" : "WHITE");
+        strip_text_centered(4, buf, 2,
+                            b->turn == BLACK ? COLOR_STRIP_WHITE
+                                             : COLOR_STRIP_BURLY,
+                            COLOR_STRIP_BG);
 
-        strip_text(8,  32, "CAP B=", 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
-        itoa2(b->captured_black, num);
-        strip_text(92, 32, num, 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
-        strip_text(140, 32, "W=", 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
-        itoa2(b->captured_white, num);
-        strip_text(168, 32, num, 2, COLOR_STRIP_GRAY, COLOR_STRIP_BG);
-
-        strip_text(440, 8,
-                   b->turn == BLACK ? "BLACK" : "WHITE",
-                   2,
-                   b->turn == BLACK ? COLOR_STRIP_WHITE : COLOR_STRIP_BURLY,
-                   COLOR_STRIP_BG);
-
+        /* Row 2 (y=26): captures + pass indicator. */
         if (b->consecutive_passes == 1) {
-            strip_text(380, 32, "1 PASS", 2,
-                       COLOR_STRIP_GREEN, COLOR_STRIP_BG);
+            snprintf(buf, sizeof(buf),
+                     "CAPTURED  B %d   W %d     1 PASS",
+                     b->captured_white, b->captured_black);
+        } else {
+            snprintf(buf, sizeof(buf),
+                     "CAPTURED  B %d   W %d",
+                     b->captured_white, b->captured_black);
         }
+        strip_text_centered(26, buf, 2,
+                            COLOR_STRIP_GRAY, COLOR_STRIP_BG);
+
+        /* Row 3 (y=50): controls hint. */
+        strip_text_centered(50,
+            "ENTER PLACE   SPACE PASS   R MENU   ESC QUIT", 1,
+            COLOR_STRIP_GRAY, COLOR_STRIP_BG);
     }
 
     strip_present();
