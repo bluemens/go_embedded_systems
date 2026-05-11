@@ -36,7 +36,7 @@ module strip_fb (
     input  logic        vsync_pulse,       // 1-cycle pulse at start of vblank
 
     // VGA-read side (front buffer)
-    input  logic [13:0] pixel_addr,        // 0..38399 pixel index
+    input  logic [15:0] pixel_addr,        // 0..38399 pixel index (needs 16 bits)
     output logic [7:0]  pixel_out
 );
 
@@ -63,7 +63,7 @@ module strip_fb (
     /* Read port: synchronous reads from each bank. */
     logic [13:0] read_word_idx;
     logic [1:0]  read_byte_idx;
-    assign read_word_idx = pixel_addr[13:2];
+    assign read_word_idx = pixel_addr[15:2];   // top 14 bits → word index (max 9599)
     assign read_byte_idx = pixel_addr[1:0];
 
     logic [31:0] read_word_a, read_word_b;

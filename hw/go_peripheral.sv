@@ -217,9 +217,9 @@ module go_peripheral(
     // Quartus will pick the implementation; on Cyclone V it'll likely use
     // a single 18×18 DSP block for the multiply, free for our purposes.
     logic [15:0] strip_pixel_full;
-    logic [13:0] strip_pixel_addr;
+    logic [15:0] strip_pixel_addr;
     assign strip_pixel_full = (py - 16'd420) * 16'd640 + px;
-    assign strip_pixel_addr = strip_pixel_full[13:0];
+    assign strip_pixel_addr = strip_pixel_full;        // full 16 bits → strip_fb
 
     logic [7:0] strip_pixel;
     strip_fb sfb (
