@@ -14,10 +14,12 @@
  */
 
 #include "ai.h"
+#include "ai_hw.h"
 
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #define N BOARD_N
 
@@ -224,6 +226,19 @@ static Move move_greedy(const BoardState *b)
     return best;
 }
 
+/* ─── Phase 9: heat-map publish callback ─────────────────────────────────── */
+
+/* Optional callback installed via ai_set_mcts_heat_callback(). Invoked from
+ * inside the tree-MCTS loop every 8 sims (plus once at the end) with a
+ * snapshot of root-child win-rates. Used by go_main.c to push live heat
+ * values to the FPGA overlay tilemap. */
+static MctsHeatCallback g_heat_cb = NULL;
+
+void ai_set_mcts_heat_callback(MctsHeatCallback cb)
+{
+    g_heat_cb = cb;
+}
+
 /* ─── Level 3: serial MCTS (UCT) ─────────────────────────────────────────── */
 
 #define MCTS_POOL       6000
@@ -318,6 +333,26 @@ static Stone rollout(BoardState state)
     return (blk > wht + 5.5) ? BLACK : WHITE;
 }
 
+/* Walk root->children, fill the two 82-slot tables (81 cells + pass), and
+ * invoke the installed heat callback. Used to publish live MCTS progress
+ * during tree-MCTS thinking. Idx >= 82 entries (shouldn't occur) are
+ * silently dropped. */
+static void publish_heat(const MctsNode *root)
+{
+    if (!g_heat_cb) return;
+    float wr[82];
+    int   v[82];
+    for (int i = 0; i < 82; i++) { wr[i] = 0.0f; v[i] = 0; }
+    for (int i = 0; i < root->n_children; i++) {
+        const MctsNode *ch = root->children[i];
+        int idx = ch->move.pass ? 81 : (ch->move.row * 9 + ch->move.col);
+        if (idx < 0 || idx >= 82) continue;
+        v[idx]  = ch->visits;
+        wr[idx] = ch->visits ? (float)ch->wins / (float)ch->visits : 0.0f;
+    }
+    g_heat_cb(wr, v);
+}
+
 static Move move_mcts(const BoardState *b)
 {
     mcts_pool_n = 0;
@@ -363,7 +398,14 @@ static Move move_mcts(const BoardState *b)
             p->visits++;
             if (p->color == winner) p->wins++;
         }
+
+        /* Phase 9: publish heat every 8 sims (25 snapshots over 200 sims). */
+        if ((sim & 7) == 7) publish_heat(root);
     }
+
+    /* Final publish so the chosen cell goes hot before the caller clears
+     * the overlay. */
+    publish_heat(root);
 
     /* Pick child with highest visit count. */
     MctsNode *best = NULL;
@@ -383,13 +425,191 @@ static Move move_mcts(const BoardState *b)
 
 /* ─── Public dispatch ────────────────────────────────────────────────────── */
 
+/* Forward declaration: filled in below the leaf-eval implementation. */
+static int g_use_hw_mcts = 0;
+static Move move_mcts_flat_hw(const BoardState *b);
+
+/* ─── Phase 9: demo-facing toggle accessors over g_use_hw_mcts ───────────── */
+
+void ai_toggle_backend(void)
+{
+    g_use_hw_mcts = !g_use_hw_mcts;
+}
+
+int ai_backend_is_hw(void)
+{
+    return g_use_hw_mcts;
+}
+
+const char *ai_backend_label(void)
+{
+    return g_use_hw_mcts ? "HW" : "SW";
+}
+
 Move ai_get_move(const BoardState *b, AiLevel level)
 {
     switch (level) {
     case AI_RANDOM: return move_random(b);
     case AI_GREEDY: return move_greedy(b);
-    case AI_MCTS:   return move_mcts(b);
+    case AI_MCTS:   return g_use_hw_mcts ? move_mcts_flat_hw(b) : move_mcts(b);
     }
     Move pass = { 0, 0, 1 };
     return pass;
+}
+
+/* ─── Leaf-eval entrypoint (mirror of HW path) ──────────────────────────── */
+
+/* One rollout that records the first move played; used by ai_mcts_sw_eval to
+ * credit per-cell wins/visits. Cell index 81 == pass. */
+static Stone rollout_first_move(BoardState state, int *first_cell)
+{
+    int moves = 0;
+    *first_cell = 81;
+    while (!state.game_over && moves < MCTS_MAX_DEPTH) {
+        Move legals[N * N];
+        int n = legal_moves(&state, legals);
+        Move m;
+        if (n == 0) {
+            m.row = 0; m.col = 0; m.pass = 1;
+        } else {
+            m = legals[rand_below(n)];
+        }
+        if (moves == 0) {
+            *first_cell = m.pass ? 81 : (m.row * N + m.col);
+        }
+        apply_move(&state, m);
+        moves++;
+    }
+    int blk, wht;
+    board_score(&state, &blk, &wht);
+    return (blk > wht + 5) ? BLACK : WHITE;   /* 5.5 komi, white wins ties */
+}
+
+void ai_mcts_sw_eval(const BoardState *leaf, uint32_t seed,
+                     MctsCellResult out[MCTS_RESULT_N])
+{
+    ai_seed(seed);
+    for (int i = 0; i < MCTS_RESULT_N; i++) {
+        out[i].wins = 0;
+        out[i].visits = 0;
+    }
+    Stone root_turn = leaf->turn;
+    for (int s = 0; s < MCTS_SIMS; s++) {
+        int first_cell = 81;
+        Stone winner = rollout_first_move(*leaf, &first_cell);
+        out[first_cell].visits++;
+        if (winner == root_turn) out[first_cell].wins++;
+    }
+}
+
+/* Dispatch via function pointer set by ai_init(). */
+typedef void (*mcts_eval_fn_t)(const BoardState *, uint32_t,
+                               MctsCellResult[MCTS_RESULT_N]);
+static mcts_eval_fn_t g_mcts_eval = ai_mcts_sw_eval;
+
+void ai_mcts_dispatch(const BoardState *leaf, uint32_t seed,
+                      MctsCellResult out[MCTS_RESULT_N])
+{
+    g_mcts_eval(leaf, seed, out);
+}
+
+int hw_mcts_self_test(void)
+{
+    /* Sanity test: proves the eval path is functioning without depending on
+     * single-move statistical dominance. Uniform-random 9x9 rollouts have
+     * ~10% per-cell noise at 200 sims, so we cannot reliably assert "the
+     * capture move dominates" without a deeper rollout policy. Real
+     * correctness comes from the A/B harness across many leaves
+     * (`go_self_test ab N`) — this is just the wedged-FSM detector. */
+    BoardState b;
+    board_init(&b);
+    b.turn = BLACK;
+    b.cells[0][0] = BLACK;
+    b.cells[0][1] = WHITE;
+    b.cells[1][1] = BLACK;
+
+    MctsCellResult out[MCTS_RESULT_N];
+    ai_mcts_dispatch(&b, 0xDEADBEEF, out);
+
+    int total_visits = 0, total_wins = 0, distinct_cells = 0;
+    for (int i = 0; i < MCTS_RESULT_N; i++) {
+        total_visits += out[i].visits;
+        total_wins   += out[i].wins;
+        if (out[i].visits > 0) distinct_cells++;
+    }
+
+    if (total_visits != MCTS_SIMS) {
+        fprintf(stderr, "self_test: visits=%d != MCTS_SIMS=%d\n",
+                total_visits, MCTS_SIMS);
+        return -1;
+    }
+    if (distinct_cells < 5) {
+        fprintf(stderr,
+                "self_test: only %d distinct cells visited (FSM wedged?)\n",
+                distinct_cells);
+        return -1;
+    }
+    if (total_wins < MCTS_SIMS / 20 || total_wins > MCTS_SIMS * 19 / 20) {
+        fprintf(stderr,
+                "self_test: wins=%d out of plausible [5%%, 95%%] band\n",
+                total_wins);
+        return -1;
+    }
+    return 0;
+}
+
+void ai_init(void)
+{
+    if (hw_init_mcts() == 0) {
+        g_mcts_eval = ai_mcts_hw_eval;
+        g_use_hw_mcts = 1;
+    } else {
+        g_mcts_eval = ai_mcts_sw_eval;
+        g_use_hw_mcts = 0;
+    }
+}
+
+/* Flat HW-MCTS: one dispatcher call on the root, pick the cell with the
+ * most visits. Strictly weaker than the tree-based SW move_mcts(), but
+ * orders of magnitude faster — and the entire point of the HW path. */
+static Move move_mcts_flat_hw(const BoardState *b)
+{
+    static uint32_t hw_call_counter = 0;
+    uint32_t seed = (uint32_t)rand32() ^ (++hw_call_counter * 0x9E3779B9u);
+    MctsCellResult out[MCTS_RESULT_N];
+    ai_mcts_dispatch(b, seed, out);
+
+    int best_idx = 81;
+    int best_visits = -1;
+    for (int i = 0; i < MCTS_RESULT_N; i++) {
+        if ((int)out[i].visits > best_visits) {
+            best_visits = (int)out[i].visits;
+            best_idx = i;
+        }
+    }
+
+    /* Publish a one-shot heat snapshot from the HW (or HW-fallback-to-SW)
+     * result. The SW tree-MCTS publishes incrementally inside its sim loop;
+     * the HW path runs in one shot and only has data at the end, so this is
+     * a single post-hoc publish — enough for the demo's "after" heat colors. */
+    if (g_heat_cb) {
+        float wr[82];
+        int   v[82];
+        for (int i = 0; i < 82; i++) {
+            v[i]  = out[i].visits;
+            wr[i] = out[i].visits ? (float)out[i].wins / (float)out[i].visits
+                                  : 0.0f;
+        }
+        g_heat_cb(wr, v);
+    }
+
+    Move m;
+    if (best_idx == 81 || best_visits == 0) {
+        m.row = 0; m.col = 0; m.pass = 1;
+    } else {
+        m.row = best_idx / N;
+        m.col = best_idx % N;
+        m.pass = 0;
+    }
+    return m;
 }

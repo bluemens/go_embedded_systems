@@ -40,6 +40,7 @@ set_fileset_property QUARTUS_SYNTH ENABLE_RELATIVE_INCLUDE_PATHS false
 set_fileset_property QUARTUS_SYNTH ENABLE_FILE_OVERWRITE_MODE false
 add_fileset_file go_peripheral.sv   SYSTEM_VERILOG PATH go_peripheral.sv TOP_LEVEL_FILE
 add_fileset_file board_mem.sv       SYSTEM_VERILOG PATH board_mem.sv
+add_fileset_file heat_map.sv        SYSTEM_VERILOG PATH heat_map.sv
 add_fileset_file strip_fb.sv        SYSTEM_VERILOG PATH strip_fb.sv
 add_fileset_file audio_controller.sv SYSTEM_VERILOG PATH audio_controller.sv
 add_fileset_file place.vh           OTHER          PATH place.vh
@@ -84,7 +85,10 @@ set_interface_property avalon_slave_0 ENABLED                       true
 add_interface_port avalon_slave_0 writedata   writedata   Input  8
 add_interface_port avalon_slave_0 write       write       Input  1
 add_interface_port avalon_slave_0 chipselect  chipselect  Input  1
-add_interface_port avalon_slave_0 address     address     Input  3
+# Phase 9: address widened from 3 to 5 bits (8 → 32 register slots).
+# After re-importing this IP, Address Map will widen to 32 bytes; the strip
+# slave at 0x10000 still has plenty of separation.
+add_interface_port avalon_slave_0 address     address     Input  5
 add_interface_port avalon_slave_0 readdata    readdata    Output 8
 set_interface_assignment avalon_slave_0 embeddedsw.configuration.isFlash             0
 set_interface_assignment avalon_slave_0 embeddedsw.configuration.isMemoryDevice      0

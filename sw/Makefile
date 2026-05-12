@@ -10,7 +10,7 @@ else
 	KERNEL_SOURCE := /usr/src/linux-headers-$(shell uname -r)
         PWD := $(shell pwd)
 
-default: module hello go_test go_phase3 go_main
+default: module hello go_test go_phase3 go_main go_self_test
 
 module:
 	${MAKE} -C ${KERNEL_SOURCE} SUBDIRS=${PWD} modules
@@ -23,20 +23,29 @@ go_test: go_test.c
 go_phase3: go_phase3.c usbkeyboard.c usbkeyboard.h
 	$(CC) -O2 -Wall -o $@ go_phase3.c usbkeyboard.c -lusb-1.0
 
-# Phase 7a: PvP + PvC (random / greedy / serial MCTS).
+# AI + MCTS HW dispatch library — shared between go_main and go_self_test.
+AI_SRC = ai.c ai_mcts_hw.c hw_iface.c board.c
+
+# Phase 7b: PvP + PvC with MCTS HW dispatch.
 go_main: go_main.c usbkeyboard.c usbkeyboard.h board.c board.h \
-         strip_render.c strip_render.h font5x7.c font5x7.h ai.c ai.h
-	$(CC) -O2 -Wall -o $@ go_main.c usbkeyboard.c board.c \
-	      strip_render.c font5x7.c ai.c -lusb-1.0 -lm
+         strip_render.c strip_render.h font5x7.c font5x7.h \
+         ai.c ai.h ai_hw.h ai_mcts_hw.c hw_iface.c hw_iface.h \
+         hw_timer.c hw_timer.h
+	$(CC) -O2 -Wall -o $@ go_main.c usbkeyboard.c $(AI_SRC) \
+	      strip_render.c font5x7.c hw_timer.c -lusb-1.0 -lm
+
+# MCTS HW smoke test: runs hw_mcts_self_test() and reports pass/fail.
+# Useful at first-boot bring-up; no USB / display required.
+go_self_test: go_self_test.c $(AI_SRC) ai.h ai_hw.h hw_iface.h board.h
+	$(CC) -O2 -Wall -o $@ go_self_test.c $(AI_SRC) -lm
 
 # Host-runnable unit tests for the rule engine. No HW deps; build on Mac/Linux.
-# Run `make board_test && ./board_test` from any machine, not just the DE1-SoC.
 board_test: board_test.c board.c board.h
 	$(CC) -O2 -Wall -o $@ board_test.c board.c
 
 clean:
 	${MAKE} -C ${KERNEL_SOURCE} SUBDIRS=${PWD} clean
-	${RM} hello go_test go_phase3 go_main board_test
+	${RM} hello go_test go_phase3 go_main go_self_test board_test
 
 TARFILES = Makefile README vga_ball.h vga_ball.c hello.c
 TARFILE = lab3-sw.tar.gz

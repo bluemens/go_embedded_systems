@@ -8,8 +8,14 @@
  *   - Strip region (py ∈ [420, 479]) sources pixels from the active strip
  *     buffer via a tiny inline 8-color palette.
  *
- * (Earlier phases: Phase 1 static board, Phase 2 tilemap + stones, Phase 3
- *  cursor + USB keyboard.)
+ * Phase 6: audio (sound effects), AUDIO_CMD / AUDIO_STATUS at 0x06/0x07.
+ *
+ * Phase 9: live demo features.
+ *   - Heat-map overlay tilemap (81 × 4-bit), rendered into empty cells when
+ *     overlay_en is set. Software publishes per-cell win-rate during MCTS.
+ *   - 32-bit free-running HW cycle counter at 50 MHz with start-capture +
+ *     stop/delta-capture. Used to time AI moves on both SW and HW backends.
+ *   - avalon_slave_0 address widened 3 → 5 bits (8 → 32 registers).
  *
  * Register map (avalon_slave_0, byte-addressed):
  *   0x00  SET_BLACK    W   data = cell_idx → cells[idx] = BLACK
@@ -18,7 +24,19 @@
  *   0x03  RESET_BOARD  W   any             → all cells = EMPTY
  *   0x04  CURSOR       W   {visible[7], cell_idx[6:0]}
  *   0x05  STRIP_SWAP   W   any             → swap strip buffers at next VS
- *   0x06..0x07         (reserved for Phase 8 — RENDER_MODE)
+ *   0x06  AUDIO_CMD    W   data[2:0]: 0=stop,1=place,2=cap,3=ill,4=over
+ *   0x07  AUDIO_STATUS R   bit 0 = audio busy
+ *   0x08  HEAT_IDX     W   data[6:0] = cell_idx for next HEAT_VAL write
+ *   0x09  HEAT_VAL     W   data[3:0] = heat value; commits at last HEAT_IDX
+ *   0x0A  OVERLAY_EN   W   data[0]   = 1 enable heat overlay, 0 disable
+ *   0x0B  HEAT_CLEAR   W   any       = clear all 81 heat cells to 0
+ *   0x10  TIMER_START  W   any       = latch cycles_count → t_start
+ *   0x11  TIMER_STOP   W   any       = latch (cycles_count − t_start) → delta
+ *   0x12  TIMER_D0     R   delta[7:0]
+ *   0x13  TIMER_D1     R   delta[15:8]
+ *   0x14  TIMER_D2     R   delta[23:16]
+ *   0x15  TIMER_D3     R   delta[31:24]
+ *   0x16  TIMER_LIVE0  R   cycles_count[7:0] (sanity-check that counter ticks)
  *
  * Strip framebuffer (avalon_slave_1, 32-bit word-addressed):
  *   word 0..9599: 38,400 pixels of the BACK buffer (4 packed 8-bit pixels each)
@@ -34,11 +52,12 @@ module go_peripheral(
     input  logic        reset,
 
     // ── avalon_slave_0: control registers ────────────────────────────────
-    input  logic [2:0]  address,
+    // Phase 9: address widened from 3 to 5 bits (8 → 32 register slots).
+    input  logic [4:0]  address,
     input  logic        chipselect,
     input  logic        write,
     input  logic [7:0]  writedata,
-    output logic [7:0]  readdata,        // for AUDIO_STATUS reads
+    output logic [7:0]  readdata,        // for AUDIO_STATUS + TIMER reads
 
     // ── avalon_slave_1: strip framebuffer write window ───────────────────
     input  logic [13:0] strip_address,
@@ -80,14 +99,27 @@ module go_peripheral(
     assign vsync_pulse = (VGA_VS == 1'b1) && (vs_d == 1'b0);
 
     // ─── Avalon register decoder (slave 0) ──────────────────────────────────
-    localparam logic [2:0] REG_SET_BLACK    = 3'h0;
-    localparam logic [2:0] REG_SET_WHITE    = 3'h1;
-    localparam logic [2:0] REG_CLEAR_CELL   = 3'h2;
-    localparam logic [2:0] REG_RESET_BOARD  = 3'h3;
-    localparam logic [2:0] REG_CURSOR       = 3'h4;
-    localparam logic [2:0] REG_STRIP_SWAP   = 3'h5;
-    localparam logic [2:0] REG_AUDIO_CMD    = 3'h6;
-    localparam logic [2:0] REG_AUDIO_STATUS = 3'h7;
+    localparam logic [4:0] REG_SET_BLACK    = 5'h00;
+    localparam logic [4:0] REG_SET_WHITE    = 5'h01;
+    localparam logic [4:0] REG_CLEAR_CELL   = 5'h02;
+    localparam logic [4:0] REG_RESET_BOARD  = 5'h03;
+    localparam logic [4:0] REG_CURSOR       = 5'h04;
+    localparam logic [4:0] REG_STRIP_SWAP   = 5'h05;
+    localparam logic [4:0] REG_AUDIO_CMD    = 5'h06;
+    localparam logic [4:0] REG_AUDIO_STATUS = 5'h07;
+    // Phase 9: heat-map overlay
+    localparam logic [4:0] REG_HEAT_IDX     = 5'h08;
+    localparam logic [4:0] REG_HEAT_VAL     = 5'h09;
+    localparam logic [4:0] REG_OVERLAY_EN   = 5'h0A;
+    localparam logic [4:0] REG_HEAT_CLEAR   = 5'h0B;
+    // Phase 9: HW cycle timer
+    localparam logic [4:0] REG_TIMER_START  = 5'h10;
+    localparam logic [4:0] REG_TIMER_STOP   = 5'h11;
+    localparam logic [4:0] REG_TIMER_D0     = 5'h12;
+    localparam logic [4:0] REG_TIMER_D1     = 5'h13;
+    localparam logic [4:0] REG_TIMER_D2     = 5'h14;
+    localparam logic [4:0] REG_TIMER_D3     = 5'h15;
+    localparam logic [4:0] REG_TIMER_LIVE0  = 5'h16;
 
     logic        bm_write_en, bm_reset_all;
     logic [6:0]  bm_write_addr;
@@ -99,6 +131,17 @@ module go_peripheral(
     logic        cursor_visible;
     logic [6:0]  cursor_idx;
 
+    // Phase 9: heat-map overlay state
+    logic [6:0]  heat_idx_latch;
+    logic        hm_write_en;
+    logic        hm_clear_all;
+    logic        overlay_en;
+
+    // Phase 9: free-running HW timer
+    logic [31:0] cycles_count;
+    logic [31:0] t_start;
+    logic [31:0] t_delta_latched;
+
     always_comb begin
         bm_write_en        = 1'b0;
         bm_write_addr      = writedata[6:0];
@@ -107,6 +150,8 @@ module go_peripheral(
         strip_swap_request = 1'b0;
         audio_cmd_valid    = 1'b0;
         audio_cmd_value    = writedata[2:0];
+        hm_write_en        = 1'b0;
+        hm_clear_all       = 1'b0;
 
         if (chipselect && write) begin
             unique case (address)
@@ -117,27 +162,70 @@ module go_peripheral(
                 REG_CURSOR:      ;   // handled in always_ff below
                 REG_STRIP_SWAP:  strip_swap_request = 1'b1;
                 REG_AUDIO_CMD:   audio_cmd_valid    = 1'b1;
+                REG_HEAT_IDX:    ;   // handled in always_ff below
+                REG_HEAT_VAL:    hm_write_en        = 1'b1;
+                REG_OVERLAY_EN:  ;   // handled in always_ff below
+                REG_HEAT_CLEAR:  hm_clear_all       = 1'b1;
+                REG_TIMER_START: ;   // handled in timer always_ff
+                REG_TIMER_STOP:  ;   // handled in timer always_ff
                 default: ;
             endcase
         end
     end
 
-    /* AUDIO_STATUS reads: bit 0 = busy. */
+    /* Readdata mux: AUDIO_STATUS, TIMER delta bytes, TIMER_LIVE0. */
     logic audio_busy;
     always_comb begin
-        if (chipselect && !write && address == REG_AUDIO_STATUS)
-            readdata = {7'b0, audio_busy};
-        else
-            readdata = 8'h00;
+        readdata = 8'h00;
+        if (chipselect && !write) begin
+            unique case (address)
+                REG_AUDIO_STATUS: readdata = {7'b0, audio_busy};
+                REG_TIMER_D0:     readdata = t_delta_latched[7:0];
+                REG_TIMER_D1:     readdata = t_delta_latched[15:8];
+                REG_TIMER_D2:     readdata = t_delta_latched[23:16];
+                REG_TIMER_D3:     readdata = t_delta_latched[31:24];
+                REG_TIMER_LIVE0:  readdata = cycles_count[7:0];
+                default:          readdata = 8'h00;
+            endcase
+        end
     end
 
+    /* State registers: cursor, heat-overlay index/enable. */
     always_ff @(posedge clk) begin
         if (reset) begin
             cursor_visible <= 1'b1;
             cursor_idx     <= 7'd40;
-        end else if (chipselect && write && address == REG_CURSOR) begin
-            cursor_visible <= writedata[7];
-            cursor_idx     <= writedata[6:0];
+            heat_idx_latch <= 7'd0;
+            overlay_en     <= 1'b0;
+        end else if (chipselect && write) begin
+            unique case (address)
+                REG_CURSOR: begin
+                    cursor_visible <= writedata[7];
+                    cursor_idx     <= writedata[6:0];
+                end
+                REG_HEAT_IDX:    heat_idx_latch <= writedata[6:0];
+                REG_OVERLAY_EN:  overlay_en     <= writedata[0];
+                default: ;
+            endcase
+        end
+    end
+
+    /* Free-running cycle counter + start/delta latches.
+     * cycles_count ticks every clk_50 edge, wrapping at ~85.9 s.
+     * Software writes TIMER_START to capture t_start, then later writes
+     * TIMER_STOP to capture (cycles_count − t_start) into t_delta_latched.
+     * t_delta_latched is held until the next TIMER_STOP write. */
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            cycles_count    <= 32'b0;
+            t_start         <= 32'b0;
+            t_delta_latched <= 32'b0;
+        end else begin
+            cycles_count <= cycles_count + 32'd1;
+            if (chipselect && write && address == REG_TIMER_START)
+                t_start <= cycles_count;
+            if (chipselect && write && address == REG_TIMER_STOP)
+                t_delta_latched <= cycles_count - t_start;
         end
     end
 
@@ -189,6 +277,21 @@ module go_peripheral(
         .reset_all  (bm_reset_all),
         .read_addr  (cell_idx),
         .read_data  (cell_value)
+    );
+
+    /* Phase 9: heat-map tilemap. Reads combinationally per pixel from the
+     * VGA scanout cell_idx; writes commit when software pulses HEAT_VAL
+     * after setting HEAT_IDX. */
+    logic [3:0] heat_value;
+    heat_map hm (
+        .clk        (clk),
+        .reset      (reset),
+        .write_en   (hm_write_en),
+        .write_addr (heat_idx_latch),
+        .write_data (writedata[3:0]),
+        .clear_all  (hm_clear_all),
+        .read_addr  (cell_idx),
+        .read_data  (heat_value)
     );
 
     logic is_star_cell;
@@ -270,6 +373,32 @@ module go_peripheral(
     localparam logic [23:0] COLOR_OUTLINE  = 24'h000000;
     localparam logic [23:0] COLOR_CURSOR   = 24'h00C040;
 
+    /* Heat palette — 16 entries on a red→yellow→green spectrum.
+     * heat_value 0 falls through to plain COLOR_BOARD_BG; 1..15 tint the
+     * empty cell's background. Grid lines, star points, cursor, and stones
+     * all draw on top of any heat tint by virtue of branch ordering. */
+    logic [23:0] heat_rgb;
+    always_comb begin
+        unique case (heat_value)
+            4'd1:    heat_rgb = 24'hB44040;
+            4'd2:    heat_rgb = 24'hC84838;
+            4'd3:    heat_rgb = 24'hD85830;
+            4'd4:    heat_rgb = 24'hE87030;
+            4'd5:    heat_rgb = 24'hF09038;
+            4'd6:    heat_rgb = 24'hF0B048;
+            4'd7:    heat_rgb = 24'hE8C860;
+            4'd8:    heat_rgb = 24'hD8D870;
+            4'd9:    heat_rgb = 24'hB8D868;
+            4'd10:   heat_rgb = 24'h90D058;
+            4'd11:   heat_rgb = 24'h70C850;
+            4'd12:   heat_rgb = 24'h50C048;
+            4'd13:   heat_rgb = 24'h38B040;
+            4'd14:   heat_rgb = 24'h28A038;
+            4'd15:   heat_rgb = 24'h209030;
+            default: heat_rgb = COLOR_BOARD_BG;     // heat_value == 0
+        endcase
+    end
+
     always_comb begin
         if (!VGA_BLANK_n) begin
             {VGA_R, VGA_G, VGA_B} = 24'h000000;
@@ -287,6 +416,8 @@ module go_peripheral(
                     {VGA_R, VGA_G, VGA_B} = COLOR_WHITE;
             end else if (on_grid || in_star_dot) begin
                 {VGA_R, VGA_G, VGA_B} = COLOR_LINE;
+            end else if (cell_value == 2'b00 && overlay_en && heat_value != 4'd0) begin
+                {VGA_R, VGA_G, VGA_B} = heat_rgb;
             end else begin
                 {VGA_R, VGA_G, VGA_B} = COLOR_BOARD_BG;
             end

@@ -1,5 +1,5 @@
 /*
- * go_main.c — Phase 8: full game flow
+ * go_main.c — Phase 8 + Phase 9: full game flow with live demo features
  *
  * UI state machine:
  *   TITLE          → "GO 9x9 — Press ENTER to start"
@@ -8,6 +8,11 @@
  *   GAME           → live game, Phase 4–7 logic, score panel updates
  *
  * Esc quits from any state. R restarts back to TITLE from GAME / GAME_OVER.
+ *
+ * Phase 9 keys (PvC + Level 3 only):
+ *   Tab   — toggle AI backend (SW tree-MCTS  ⇄  HW flat-MCTS)
+ *   Y     — replay the previous AI move with the *other* backend
+ *           on the same board, for a live side-by-side speedup demo.
  *
  * argv shortcut: ./go_main [N]
  *   N absent     → start at TITLE
@@ -25,6 +30,8 @@
 
 #include "board.h"
 #include "ai.h"
+#include "ai_hw.h"
+#include "hw_timer.h"
 #include "usbkeyboard.h"
 #include "strip_render.h"
 #include <time.h>
@@ -44,6 +51,11 @@
 #define REG_STRIP_SWAP    0x05
 #define REG_AUDIO_CMD     0x06
 #define REG_AUDIO_STATUS  0x07
+/* Phase 9: heat-map overlay registers (timer regs live in hw_timer.c). */
+#define REG_HEAT_IDX      0x08
+#define REG_HEAT_VAL      0x09
+#define REG_OVERLAY_EN    0x0A
+#define REG_HEAT_CLEAR    0x0B
 
 #define AUDIO_NONE      0
 #define AUDIO_PLACE     1
@@ -93,6 +105,39 @@ static void hw_push_board(const BoardState *b)
         }
 }
 
+/* ─── Phase 9: heat-map overlay helpers ──────────────────────────────────── */
+
+static void hw_set_heat(int cell, int level)
+{
+    /* Two-write protocol: IDX latches address, VAL commits {addr, value}. */
+    wr8(REG_HEAT_IDX, (uint8_t)(cell  & 0x7F));
+    wr8(REG_HEAT_VAL, (uint8_t)(level & 0x0F));
+}
+static inline void hw_overlay_enable(int on) { wr8(REG_OVERLAY_EN, on ? 1 : 0); }
+static inline void hw_heat_clear(void)       { wr8(REG_HEAT_CLEAR, 1); }
+
+/* MctsHeatCallback. Win-rate ∈ [0,1] maps to heat level ∈ [1,15] for
+ * visited cells; level 0 means "never visited" and shows no tint.
+ *
+ * Index 81 is the pass move — we don't render it on the board, so we
+ * just skip it. Calls 81 cells × 2 byte writes ≈ 162 writes × ~4 LW cycles
+ * ≈ 13 µs total, comfortably inside the per-snapshot budget. */
+static void heat_cb(const float win_rates[82], const int visits[82])
+{
+    for (int i = 0; i < 81; i++) {
+        int level;
+        if (visits[i] == 0) {
+            level = 0;
+        } else {
+            int q = (int)(win_rates[i] * 15.0f + 0.5f);
+            if (q < 1)  q = 1;
+            if (q > 15) q = 15;
+            level = q;
+        }
+        hw_set_heat(i, level);
+    }
+}
+
 /* ─── HID keycodes ───────────────────────────────────────────────────────── */
 #define KEY_RIGHT 0x4F
 #define KEY_LEFT  0x50
@@ -102,6 +147,25 @@ static void hw_push_board(const BoardState *b)
 #define KEY_SPACE 0x2C
 #define KEY_ESC   0x29
 #define KEY_R     0x15
+/* Phase 9: live-demo keys. */
+#define KEY_TAB   0x2B
+#define KEY_Y     0x1C
+
+/* ─── Phase 9: AI timing + replay state ──────────────────────────────────── */
+
+/* Most-recent AI move's timing (in 50 MHz cycles) and which backend ran. */
+static uint32_t last_ai_cycles = 0;
+static char     last_ai_label[8]  = "";
+
+/* Second-most-recent: shown alongside "LAST" when the two backends differ
+ * (e.g. after pressing Y to replay with the opposite backend). */
+static uint32_t prev_ai_cycles = 0;
+static char     prev_ai_label[8]  = "";
+
+/* Board state captured immediately before the last AI move, so KEY_Y can
+ * rewind and re-run the same position on the other backend. */
+static BoardState replay_snapshot;
+static int        replay_valid = 0;
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -225,22 +289,76 @@ static void render_panel(const BoardState *b)
         strip_text_centered(26, buf, 2,
                             COLOR_STRIP_GRAY, COLOR_STRIP_BG);
 
-        /* Row 3 (y=50): controls hint. */
+        /* Row 3 (y=41): Phase 9 backend label + last/prev AI timing.
+         * Hidden when no AI move has been observed yet (PvP mode, fresh
+         * game). When LAST and PREV are from different backends, also
+         * shows a "Nx" speedup factor. */
+        if (last_ai_cycles > 0) {
+            double last_ms = hw_timer_cycles_to_ms(last_ai_cycles);
+            if (prev_ai_cycles > 0
+                && strcmp(prev_ai_label, last_ai_label) != 0) {
+                double prev_ms = hw_timer_cycles_to_ms(prev_ai_cycles);
+                double speedup = (last_ms > 0.0) ? prev_ms / last_ms : 0.0;
+                snprintf(buf, sizeof(buf),
+                         "%s %.2fMS  PREV %s %.2fMS  %.0fX",
+                         last_ai_label, last_ms,
+                         prev_ai_label, prev_ms, speedup);
+            } else {
+                snprintf(buf, sizeof(buf), "BACKEND %s  LAST %.2f MS",
+                         ai_backend_label(), last_ms);
+            }
+            strip_text_centered(41, buf, 1,
+                                COLOR_STRIP_GREEN, COLOR_STRIP_BG);
+        } else {
+            snprintf(buf, sizeof(buf), "BACKEND %s", ai_backend_label());
+            strip_text_centered(41, buf, 1,
+                                COLOR_STRIP_GREEN, COLOR_STRIP_BG);
+        }
+
+        /* Row 4 (y=50): controls hint (Phase 9: + TAB / Y). */
         strip_text_centered(50,
-            "ENTER PLACE   SPACE PASS   R MENU   ESC QUIT", 1,
+            "ENTER PLAY  SPC PASS  TAB SWAP  Y REPLAY  R MENU  ESC QUIT", 1,
             COLOR_STRIP_GRAY, COLOR_STRIP_BG);
     }
 
     strip_present();
 }
 
-/* Apply an AI move to the BoardState; sync HW; print log. */
+/* Apply an AI move to the BoardState; sync HW; print log.
+ *
+ * Phase 9: wraps the AI call with the HW cycle counter for live timing,
+ * enables the heat overlay during the call (the SW tree-MCTS publishes
+ * heat via the installed callback; the HW flat path runs too fast for
+ * meaningful live updates and just gets a brief flash), and saves the
+ * pre-move board into replay_snapshot so KEY_Y can rewind. */
 static void apply_ai_move(BoardState *b, AiLevel level,
                           int cursor_row, int cursor_col)
 {
     Stone moved = b->turn;
     int prev_caps = b->captured_black + b->captured_white;
+
+    /* Snapshot before mutating, so KEY_Y can re-run on the same board. */
+    replay_snapshot = *b;
+    replay_valid    = 1;
+
+    /* Roll "LAST" → "PREV" so the strip can show the speedup pair. */
+    prev_ai_cycles = last_ai_cycles;
+    strncpy(prev_ai_label, last_ai_label, sizeof(prev_ai_label));
+    prev_ai_label[sizeof(prev_ai_label) - 1] = '\0';
+
+    /* Heat overlay live during the AI call. Cleared (cells zeroed) first
+     * so a previous turn's heat doesn't flash. Enable, run, disable. */
+    if (level == AI_MCTS) {
+        hw_heat_clear();
+        hw_overlay_enable(1);
+    }
+    hw_timer_start();
     Move m = ai_get_move(b, level);
+    last_ai_cycles = hw_timer_stop_cycles();
+    hw_overlay_enable(0);
+    strncpy(last_ai_label, ai_backend_label(), sizeof(last_ai_label));
+    last_ai_label[sizeof(last_ai_label) - 1] = '\0';
+
     if (m.pass) {
         board_pass(b);
         printf("AI (%s) passes.\n", stone_str(moved));
@@ -254,7 +372,10 @@ static void apply_ai_move(BoardState *b, AiLevel level,
         } else {
             int new_caps = b->captured_black + b->captured_white;
             hw_play_audio(new_caps > prev_caps ? AUDIO_CAPTURE : AUDIO_PLACE);
-            printf("AI (%s) plays (%d,%d).\n", stone_str(moved), m.row, m.col);
+            printf("AI (%s) plays (%d,%d).  [%s, %.2f ms]\n",
+                   stone_str(moved), m.row, m.col,
+                   last_ai_label,
+                   hw_timer_cycles_to_ms(last_ai_cycles));
         }
     }
     hw_push_board(b);
@@ -290,6 +411,13 @@ static void enter_game(BoardState *b, int *crow, int *ccol)
 {
     board_init(b);
     hw_reset_board();
+    hw_heat_clear();
+    hw_overlay_enable(0);
+    replay_valid       = 0;
+    last_ai_cycles     = 0;
+    last_ai_label[0]   = '\0';
+    prev_ai_cycles     = 0;
+    prev_ai_label[0]   = '\0';
     *crow = 4; *ccol = 4;
     hw_cursor(*crow, *ccol, 1);
     render_panel(b);
@@ -310,6 +438,7 @@ int main(int argc, char **argv)
         else if (n >= 1 && n <= 3)   { skip_menu = 1; pvc = 1; ai_level = (AiLevel)n; }
     }
     ai_seed((uint32_t)time(NULL));
+    ai_init();   /* probes MCTS accelerator; routes Level 3 to HW if present */
 
     /* Open keyboard + map FPGA */
     uint8_t endpoint;
@@ -317,6 +446,15 @@ int main(int argc, char **argv)
     if (!kbd) { fprintf(stderr, "No USB keyboard.\n"); return 1; }
     if (hw_init() != 0) { libusb_close(kbd); return 1; }
     strip_init(lw_base, STRIP_FB_OFFSET, GO_PERIPHERAL_OFFSET + REG_STRIP_SWAP);
+
+    /* Phase 9: bind the HW timer to our go_regs base, and install the
+     * heat-publish callback so SW tree-MCTS pushes live overlay updates. */
+    hw_timer_init((volatile uint8_t *)go_regs);
+    hw_overlay_enable(0);
+    hw_heat_clear();
+    ai_set_mcts_heat_callback(heat_cb);
+    printf("Phase 9: AI backend = %s (Tab toggles, Y replays).\n",
+           ai_backend_label());
 
     BoardState b;
     int cursor_row = 4, cursor_col = 4;
@@ -472,6 +610,39 @@ int main(int argc, char **argv)
                     printf("\n--- back to menu ---\n");
                 }
                 break;
+            /* ─── Phase 9: backend toggle ─────────────────────────────── */
+            case KEY_TAB:
+                if (pvc && ai_level == AI_MCTS) {
+                    ai_toggle_backend();
+                    printf("AI backend → %s\n", ai_backend_label());
+                    render_panel(&b);
+                }
+                break;
+            /* ─── Phase 9: replay last AI move with the other backend ── */
+            case KEY_Y: {
+                if (!(pvc && ai_level == AI_MCTS)) break;
+                if (!replay_valid) {
+                    printf("Replay: nothing to replay yet.\n");
+                    break;
+                }
+                if (b.game_over) {
+                    printf("Replay: game is over.\n");
+                    break;
+                }
+                /* Rewind the board to the moment before the previous AI
+                 * call, toggle the backend, then re-issue the move. The
+                 * speedup row in render_panel picks this up because LAST
+                 * and PREV will now carry different labels. */
+                b = replay_snapshot;
+                replay_valid = 0;            /* prevent infinite Y-loops */
+                ai_toggle_backend();
+                printf("Replay (%s) on same board...\n", ai_backend_label());
+                fflush(stdout);
+                hw_push_board(&b);
+                hw_cursor(cursor_row, cursor_col, 1);
+                apply_ai_move(&b, ai_level, cursor_row, cursor_col);
+                break;
+            }
             default: break;
             }
             break;

@@ -84,7 +84,18 @@ IP_SOURCES = go_peripheral_hw.tcl \
              board_mem.sv \
              strip_fb.sv \
              audio_controller.sv \
-             place.vh capture.vh illegal.vh gameover.vh
+             place.vh capture.vh illegal.vh gameover.vh \
+             ip/mcts_accel/mcts_accel_hw.tcl \
+             ip/mcts_accel/mcts_accel_pkg.sv \
+             ip/mcts_accel/flood_fill.sv \
+             ip/mcts_accel/lfsr16.sv \
+             ip/mcts_accel/rollout_engine.sv \
+             ip/mcts_accel/mcts_accel.sv
+
+# Number of parallel rollout engines. Override on the command line for the
+# fast bring-up build:   make NUM_ENGINES=1
+NUM_ENGINES ?= 8
+SIMS_PER_ENGINE ?= 25
 
 .PHONY : qsys
 qsys : $(SOPCINFO)
